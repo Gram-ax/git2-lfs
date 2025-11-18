@@ -1,0 +1,12 @@
+[package]
+name = "lfs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+git2 = { git = "https://github.com/pashokitsme/git2-rs", branch = "filter" }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+rstest = "0.26.1"
