@@ -8,9 +8,6 @@ anyhow = "1.0.100"
 git2 = { git = "https://github.com/pashokitsme/git2-rs", branch = "filter", default-features = false, features = [
   "vendored-libgit2",
 ] }
-# git2 = { path = "/Users/pavel.smirnov/Source/work/git2-rs", default-features = false, features = [
-#   "vendored-libgit2",
-# ] }
 hex = "0.4.3"
 sha2 = "0.10.9"
 thiserror = "2.0.17"
