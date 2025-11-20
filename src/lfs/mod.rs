@@ -5,6 +5,8 @@ use std::str;
 
 use git2::{Error, Filter, FilterMode, FilterSource, ObjectType};
 
+pub(crate) mod pointer;
+
 pub struct Payload {
   last_file_name: String,
 }
@@ -19,6 +21,9 @@ pub struct Lfs();
 
 impl Lfs {
   pub fn install(&self) -> Result<(), Error> {
+    
+    pointer::Pointer::from_bytes(b"test");
+    
     let mut filter = Filter::<Payload>::new()?;
 
     filter

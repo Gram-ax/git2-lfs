@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 use git2::*;
 
-use lfs::lfs::Lfs;
+use lfs::Lfs;
 
 fn add(repo: Repository, path: &Path) -> Result<()> {
   let mut index = repo.index()?;
@@ -44,6 +44,8 @@ fn status(repo: Repository) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+  
+  
   let lfs = Lfs();
   let repo = Repository::open("repo")?;
   lfs.install()?;
