@@ -1,20 +1,12 @@
-use std::cell::OnceCell;
-use std::path::Path;
 use std::sync::OnceLock;
 
-use assertables::assert_contains::assert_contains;
-use assertables::assert_ok;
 use assertables::assert_some;
-use git2::build::CheckoutBuilder;
-use git2_lfs::Pointer;
-use git2_lfs::ext::BlobLfsExt;
 use git2_lfs::ext::RemoteLfsExt;
 use git2_lfs::ext::RepoLfsExt;
 use git2_lfs::remote::LfsRemote;
 use git2_lfs::remote::reqwest::ReqwestLfsClient;
 use rstest::rstest;
 use tempfile::TempDir;
-use url::Url;
 
 use crate::sandbox;
 
