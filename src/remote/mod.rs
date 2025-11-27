@@ -92,12 +92,13 @@ impl<'a, C: Download + Send + Sync> LfsRemote<'a, C> {
 
       let mut buf = BufWriter::new(File::options().create_new(true).write(true).open(&path)?);
 
-      info!(path = %path.display(), download = ?download_action, "downloading lfs object");
+      let local_path = path.strip_prefix(&object_dir).unwrap_or(&path);
+      info!(path = %local_path.display(), download = %download_action.href, "downloading lfs object");
 
       let downloaded_pointer = self.client.download(&download_action, &mut buf).await?;
 
       if downloaded_pointer.hash() != pointer.hash() {
-        error!(path = %path.display(), expected = %pointer, got = %downloaded_pointer, "checksum mismatch; removing downloaded object");
+        error!(path = %local_path.display(), expected = %pointer, got = %downloaded_pointer, "checksum mismatch; removing downloaded object");
         std::fs::remove_file(path)?;
         return Err(RemoteError::ChecksumMismatch);
       }
