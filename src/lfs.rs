@@ -70,7 +70,7 @@ impl<'a> Lfs<'a> {
     let path = self.object_dir().join(pointer.path());
 
     if path.exists() {
-      info!(path = %path.display(), "object already exists, skipping");
+      debug!(path = %path.display(), "object already exists, skipping");
       return Ok(());
     }
 
