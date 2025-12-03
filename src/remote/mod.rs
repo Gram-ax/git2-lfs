@@ -99,6 +99,8 @@ impl<'a, C: Download + Send + Sync> LfsRemote<'a, C> {
 
       let downloaded_pointer = self.client.download(&download_action, &mut buf).await?;
 
+      drop(buf);
+
       if downloaded_pointer.hash() != pointer.hash() {
         error!(path = %local_path.display(), expected = %pointer, got = %downloaded_pointer, "checksum mismatch; removing downloaded object");
         std::fs::remove_file(path)?;
