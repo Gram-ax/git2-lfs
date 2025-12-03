@@ -39,7 +39,7 @@ pub enum RemoteError {
   #[error("io: {0}")]
   Io(#[from] std::io::Error),
 
-  #[error("{}", crate::report_error(self))]
+  #[error(transparent)]
   Custom(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 

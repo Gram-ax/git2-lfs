@@ -39,7 +39,7 @@ pub enum Error {
   Io(#[from] std::io::Error),
 }
 
-pub(crate) fn report_error(mut err: &dyn std::error::Error) -> String {
+pub fn report_error(mut err: &dyn std::error::Error) -> String {
   use std::fmt::Write;
 
   let mut s = format!("{err}");
