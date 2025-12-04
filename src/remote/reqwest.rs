@@ -1,5 +1,5 @@
 use crate::Pointer;
-use crate::remote::Remote;
+use crate::remote::LfsRemote;
 use crate::remote::Write;
 use crate::remote::dto::BatchResponse;
 
@@ -66,7 +66,7 @@ impl ReqwestExt for Result<reqwest::Response, reqwest::Error> {
 }
 
 #[async_trait]
-impl Remote for ReqwestLfsClient {
+impl LfsRemote for ReqwestLfsClient {
   async fn batch(&self, req: BatchRequest) -> Result<BatchResponse, RemoteError> {
     let mut batch_url = self.url.clone();
     batch_url

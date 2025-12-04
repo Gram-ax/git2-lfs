@@ -56,7 +56,7 @@ pub type Write = dyn std::io::Write + Send;
 pub type Read = dyn std::io::Read + Send;
 
 #[async_trait]
-pub trait Remote: Send + Sync {
+pub trait LfsRemote: Send + Sync {
   async fn batch(&self, req: BatchRequest) -> Result<BatchResponse, RemoteError>;
   async fn download(&self, action: &ObjectAction, to: &mut Write) -> Result<Pointer, RemoteError>;
   async fn upload(&self, action: &ObjectAction, blob: Vec<u8>) -> Result<(), RemoteError>;
@@ -68,7 +68,7 @@ pub struct LfsRemote<'a, C: Send + Sync> {
   client: C,
 }
 
-impl<'a, C: Remote + Send + Sync> LfsRemote<'a, C> {
+impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
   pub fn new(repo: &'a git2::Repository, client: C) -> Self {
     Self { repo, client }
   }
