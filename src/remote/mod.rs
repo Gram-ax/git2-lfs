@@ -21,6 +21,9 @@ pub enum RemoteError {
   #[error("access denied")]
   AccessDenied,
 
+  #[error("object error: {0}")]
+  ObjectError(String),
+
   #[error("not found")]
   NotFound,
 
@@ -96,7 +99,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
     }
 
     let request = BatchRequest {
-      operation: "download".to_string(),
+      operation: "upload".to_string(),
       transfers: vec!["basic".to_string()],
       objects: pointers.iter().map(|p| BatchObject { oid: p.hex(), size: p.size() as u64 }).collect(),
       hash_algo: Some("sha256".to_string()),
@@ -113,6 +116,10 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
     debug!(response = ?response);
 
     for object in response.objects {
+      if let Some(error) = object.error {
+        return Err(RemoteError::ObjectError(format!("{} - {}", error.code, error.message)));
+      }
+
       let actions = object.actions.ok_or(RemoteError::EmptyResponse)?;
       let download_action = actions.download.ok_or(RemoteError::EmptyResponse)?;
 
@@ -145,6 +152,10 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
     debug!(response = ?response);
 
     for object in response.objects {
+      if let Some(error) = object.error {
+        return Err(RemoteError::ObjectError(format!("{} - {}", error.code, error.message)));
+      }
+
       let actions = object.actions.ok_or(RemoteError::EmptyResponse)?;
       let pointer = pointers.iter().find(|p| p.hex() == object.oid).ok_or(RemoteError::NotFound)?;
       let rel_object_path = pointer.path();
