@@ -24,8 +24,17 @@ pub enum RemoteError {
   #[error("not found")]
   NotFound,
 
+  #[error("batch failed: {0}")]
+  Batch(String),
+
   #[error("download failed: {0}")]
   Download(String),
+
+  #[error("upload failed: {0}")]
+  Upload(String),
+
+  #[error("verify failed: {0}")]
+  Verify(String),
 
   #[error("checksum mismatch")]
   ChecksumMismatch,
@@ -44,11 +53,14 @@ pub enum RemoteError {
 }
 
 pub type Write = dyn std::io::Write + Send;
+pub type Read = dyn std::io::Read + Send;
 
 #[async_trait]
-pub trait Download: Send + Sync {
+pub trait Remote: Send + Sync {
   async fn batch(&self, req: BatchRequest) -> Result<BatchResponse, RemoteError>;
   async fn download(&self, action: &ObjectAction, to: &mut Write) -> Result<Pointer, RemoteError>;
+  async fn upload(&self, action: &ObjectAction, from: Vec<u8>) -> Result<(), RemoteError>;
+  async fn verify(&self, action: &ObjectAction, pointer: &Pointer) -> Result<(), RemoteError>;
 }
 
 pub struct LfsRemote<'a, C: Send + Sync> {
@@ -56,7 +68,7 @@ pub struct LfsRemote<'a, C: Send + Sync> {
   client: C,
 }
 
-impl<'a, C: Download + Send + Sync> LfsRemote<'a, C> {
+impl<'a, C: Remote + Send + Sync> LfsRemote<'a, C> {
   pub fn new(repo: &'a git2::Repository, client: C) -> Self {
     Self { repo, client }
   }
@@ -76,6 +88,23 @@ impl<'a, C: Download + Send + Sync> LfsRemote<'a, C> {
     let response = self.client.batch(request).await?;
 
     self.download_objects(response, pointers).await
+  }
+
+  pub async fn push(&self, pointers: &[Pointer]) -> Result<(), RemoteError> {
+    if pointers.is_empty() {
+      return Ok(());
+    }
+
+    let request = BatchRequest {
+      operation: "download".to_string(),
+      transfers: vec!["basic".to_string()],
+      objects: pointers.iter().map(|p| BatchObject { oid: p.hex(), size: p.size() as u64 }).collect(),
+      hash_algo: Some("sha256".to_string()),
+    };
+
+    let response = self.client.batch(request).await?;
+
+    self.upload_objects(response, pointers).await
   }
 
   async fn download_objects(&self, response: BatchResponse, pointers: &[Pointer]) -> Result<(), RemoteError> {
@@ -107,6 +136,32 @@ impl<'a, C: Download + Send + Sync> LfsRemote<'a, C> {
         return Err(RemoteError::ChecksumMismatch);
       }
     }
+    Ok(())
+  }
+
+  async fn upload_objects(&self, response: BatchResponse, pointers: &[Pointer]) -> Result<(), RemoteError> {
+    let object_dir = self.repo.path().join("lfs/objects");
+
+    debug!(response = ?response);
+
+    for object in response.objects {
+      let actions = object.actions.ok_or(RemoteError::EmptyResponse)?;
+      let pointer = pointers.iter().find(|p| p.hex() == object.oid).ok_or(RemoteError::NotFound)?;
+      let rel_object_path = pointer.path();
+
+      if let Some(upload_action) = actions.upload {
+        let object_path = object_dir.join(&rel_object_path);
+        let content = std::fs::read(object_path)?;
+        info!(path = %rel_object_path.display(), upload = %upload_action.href, "uploading lfs object");
+        self.client.upload(&upload_action, content).await?;
+      }
+
+      if let Some(verify_action) = actions.verify {
+        info!(path = %rel_object_path.display(), verify = %verify_action.href, "verifying lfs object");
+        self.client.verify(&verify_action, pointer).await?;
+      }
+    }
+
     Ok(())
   }
 }
