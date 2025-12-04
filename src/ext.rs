@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::path::Path;
+use std::str::FromStr;
 
 use git2::*;
 use tracing::*;
@@ -7,10 +8,16 @@ use url::Url;
 
 use crate::Error;
 use crate::Pointer;
+use crate::pointer::POINTER_ROUGH_LEN;
 
 pub trait RepoLfsExt {
   fn get_lfs_blob_content<'r>(&self, blob: &'r git2::Blob<'_>) -> Result<Cow<'r, [u8]>, Error>;
   fn find_tree_missing_lfs_objects(&self, tree: &git2::Tree<'_>) -> Result<Vec<Pointer>, Error>;
+  fn find_objects_to_push(
+    &self,
+    reference: &git2::Reference,
+    upstream: &git2::Reference,
+  ) -> Result<Vec<Pointer>, Error>;
 }
 
 pub trait RemoteLfsExt {
@@ -97,6 +104,37 @@ impl RepoLfsExt for git2::Repository {
     })?;
 
     Ok(missing)
+  }
+
+  fn find_objects_to_push(
+    &self,
+    reference: &git2::Reference,
+    upstream: &git2::Reference,
+  ) -> Result<Vec<Pointer>, Error> {
+    let head_tree = reference.resolve()?.peel_to_tree()?;
+    let upstream_tree = upstream.resolve()?.peel_to_tree()?;
+
+    let diff = self.diff_tree_to_tree(Some(&upstream_tree), Some(&head_tree), None)?;
+
+    let mut objects_to_push = Vec::new();
+
+    for delta in diff.deltas().filter(|d| d.new_file().exists()) {
+      let maybe_lfs_oid = delta.new_file().id();
+      let blob = self.find_blob(delta.new_file().id())?;
+
+      if !POINTER_ROUGH_LEN.contains(&blob.size()) {
+        continue;
+      }
+
+      let Ok(pointer) = Pointer::from_str(String::from_utf8_lossy(blob.content()).as_ref()) else {
+        debug!(oid = %maybe_lfs_oid, "skipping non-lfs pointer file");
+        continue;
+      };
+
+      objects_to_push.push(pointer);
+    }
+
+    Ok(objects_to_push)
   }
 }
 

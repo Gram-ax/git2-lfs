@@ -12,6 +12,8 @@ use crate::Error;
 
 use tracing::*;
 
+pub const POINTER_ROUGH_LEN: std::ops::Range<usize> = 120..220;
+
 const HASH_LEN: usize = 32;
 const HEX_LEN: usize = HASH_LEN * 2;
 
@@ -112,7 +114,7 @@ impl Pointer {
   }
 
   pub fn from_str_short(bytes: &[u8]) -> Option<Self> {
-    match bytes.get(..(bytes.len().min(150))).map(str::from_utf8) {
+    match bytes.get(..(bytes.len().min(POINTER_ROUGH_LEN.end))).map(str::from_utf8) {
       Some(Ok(text)) => {
         let pointer = Pointer::from_str(text);
         if let Err(ref err) = pointer {
