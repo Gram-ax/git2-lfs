@@ -124,14 +124,14 @@ impl Remote for ReqwestLfsClient {
     Ok(Pointer::from_parts(hash.as_slice(), total))
   }
 
-  async fn upload(&self, action: &ObjectAction, from: Vec<u8>) -> Result<(), RemoteError> {
+  async fn upload(&self, action: &ObjectAction, blob: Vec<u8>) -> Result<(), RemoteError> {
     let mut req = self.client.put(&action.href);
 
     for (key, value) in action.header.iter() {
       req = req.header(key, value);
     }
 
-    req.body(from).send().await.or_err(RemoteError::Upload).await?;
+    req.body(blob).send().await.or_err(RemoteError::Upload).await?;
 
     Ok(())
   }

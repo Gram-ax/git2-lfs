@@ -59,7 +59,7 @@ pub type Read = dyn std::io::Read + Send;
 pub trait Remote: Send + Sync {
   async fn batch(&self, req: BatchRequest) -> Result<BatchResponse, RemoteError>;
   async fn download(&self, action: &ObjectAction, to: &mut Write) -> Result<Pointer, RemoteError>;
-  async fn upload(&self, action: &ObjectAction, from: Vec<u8>) -> Result<(), RemoteError>;
+  async fn upload(&self, action: &ObjectAction, blob: Vec<u8>) -> Result<(), RemoteError>;
   async fn verify(&self, action: &ObjectAction, pointer: &Pointer) -> Result<(), RemoteError>;
 }
 
