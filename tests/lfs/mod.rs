@@ -118,3 +118,68 @@ fn lfs_smudge_checkout(
 
   Ok(())
 }
+
+#[rstest]
+fn lfs_checkout_same_file_twice(
+  _sandbox: TempDir,
+  #[with(&_sandbox)] repo: git2::Repository,
+) -> Result<(), anyhow::Error> {
+  let bin_path = Path::new("data.bin");
+  let workdir = repo.workdir().unwrap();
+
+  let bin_v1 = b"version 1 content";
+  assert_ok!(std::fs::write(workdir.join(bin_path), bin_v1));
+
+  let mut index = repo.index().unwrap();
+  index.add_all(["*"], IndexAddOption::default(), None).unwrap();
+  index.write().unwrap();
+
+  let tree_id = index.write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+
+  let signature = git2::Signature::now("Tester", "tester@example.com").unwrap();
+  let commit_id = repo.commit(Some("HEAD"), &signature, &signature, "add data.bin v1", &tree, &[]).unwrap();
+
+  let branch_name = "feature-branch";
+  repo.branch(branch_name, &repo.find_commit(commit_id).unwrap(), false).unwrap();
+
+  repo.set_head(&format!("refs/heads/{}", branch_name))?;
+  repo.checkout_head(Some(CheckoutBuilder::new().force()))?;
+
+  let bin_v2 = b"version 2 content";
+  assert_ok!(std::fs::write(workdir.join(bin_path), bin_v2));
+
+  index.add_all(["*"], IndexAddOption::default(), None).unwrap();
+  index.write().unwrap();
+
+  let tree_id_v2 = index.write_tree().unwrap();
+  let tree_v2 = repo.find_tree(tree_id_v2).unwrap();
+
+  repo
+    .commit(
+      Some("HEAD"),
+      &signature,
+      &signature,
+      "update data.bin v2",
+      &tree_v2,
+      &[&repo.find_commit(commit_id).unwrap()],
+    )
+    .unwrap();
+
+  let content_v2 = std::fs::read(workdir.join(bin_path))?;
+  assert_eq!(content_v2, bin_v2);
+
+  repo.set_head("refs/heads/master")?;
+  repo.checkout_head(Some(CheckoutBuilder::new().force()))?;
+
+  let content_v1 = std::fs::read(workdir.join(bin_path))?;
+  assert_eq!(content_v1, bin_v1);
+
+  repo.set_head(&format!("refs/heads/{}", branch_name))?;
+  repo.checkout_head(Some(CheckoutBuilder::new().force()))?;
+
+  let content_v2_again = std::fs::read(workdir.join(bin_path))?;
+  assert_eq!(content_v2_again, bin_v2);
+
+  Ok(())
+}
