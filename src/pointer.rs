@@ -21,7 +21,7 @@ const VERSION: &str = "version https://git-lfs.github.com/spec/v1";
 const OID_PREFIX: &str = "oid sha256:";
 const SIZE_PREFIX: &str = "size ";
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Hash)]
 pub struct Pointer {
   hash: [u8; HASH_LEN],
   size: usize,
