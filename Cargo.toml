@@ -41,7 +41,7 @@ tokio = { version = "1", features = ["rt", "macros"] }
 
 
 [features]
-default = ["git2-https", "git2-ssh", "git2-vendored-openssl"]
+default = ["git2-https", "git2-ssh", "reqwest-backend"]
 
 reqwest-backend = ["reqwest", "futures"]
 git2-https = ["git2/https"]
