@@ -47,6 +47,11 @@ impl<'a> Lfs<'a> {
   }
 
   pub fn clean(self, input: &[u8], out: &mut FilterBuf) -> Result<bool, Error> {
+    if input.len() == 0 {
+      info!("clean: passing through zero-sized object");
+      return Ok(false);
+    }
+
     let pointer = Pointer::from_blob_bytes(input)?;
     self.store_object_if_not_exists(&pointer, input)?;
     pointer.write_pointer(&mut out.as_allocated_vec())?;
@@ -55,6 +60,11 @@ impl<'a> Lfs<'a> {
   }
 
   pub fn smudge(self, input: &[u8], out: &mut FilterBuf) -> Result<bool, Error> {
+    if input.len() == 0 {
+      info!("smudge: passing through zero-sized object");
+      return Ok(false);
+    }
+
     let Some(pointer) = Pointer::from_str_short(input) else {
       debug!("not a lfs pointer, passing through");
       return Ok(false);
