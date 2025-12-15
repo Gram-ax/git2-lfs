@@ -64,7 +64,7 @@ impl RepoLfsExt for git2::Repository {
   }
 
   fn find_tree_missing_lfs_objects(&self, tree: &git2::Tree<'_>) -> Result<Vec<Pointer>, Error> {
-    let mut missing = Vec::new();
+    let mut missing = HashSet::<Pointer>::new();
 
     tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
       let Some(ObjectType::Blob) = entry.kind() else {
@@ -93,7 +93,7 @@ impl RepoLfsExt for git2::Repository {
             entry.name().unwrap_or_default()
           );
 
-          missing.push(pointer)
+          missing.insert(pointer);
         }
         _ => (),
       }
@@ -101,7 +101,7 @@ impl RepoLfsExt for git2::Repository {
       TreeWalkResult::Ok
     })?;
 
-    Ok(missing)
+    Ok(missing.into_iter().collect())
   }
 
   fn find_lfs_objects_to_push(
