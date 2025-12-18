@@ -114,7 +114,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
   async fn download_objects(&self, response: BatchResponse, pointers: &[Pointer]) -> Result<(), RemoteError> {
     let object_dir = self.repo.path().join("lfs/objects");
 
-    debug!(response = ?response);
+    debug!(response = ?response, "download: got batch response");
 
     for (index, object) in response.objects.into_iter().enumerate() {
       if let Some(error) = object.error {
@@ -122,7 +122,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
       }
 
       let Some(actions) = object.actions else {
-        warn!(index = %index, "pull: server didn't want us to do anything with '{}' (actions is None); skip", object.oid);
+        debug!(index = %index, "download: server didn't want us to do anything with '{}' (actions is None); skip", object.oid);
         continue;
       };
 
@@ -134,36 +134,39 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
       std::fs::create_dir_all(path.parent().unwrap())?;
 
       let mut attempt = 0;
-      let delay = Duration::from_millis(500);
+      let retry_delay = Duration::from_millis(500);
 
       while attempt < 3 {
         if path.exists() {
           std::fs::remove_file(&path)?;
         }
+
         let mut buf = BufWriter::new(File::options().create_new(true).write(true).open(&path)?);
 
         let local_path = path.strip_prefix(&object_dir).unwrap_or(&path);
-        info!(index = %index, path = %local_path.display(), download = %download_action.href, size = %pointer.size(), "downloading lfs object");
+        info!(index = %index, path = %local_path.display(), download = %download_action.href, size = %pointer.size(), "pull: downloading lfs object");
         let download_result = self.client.download(&download_action, &mut buf).await;
         drop(buf);
 
-        match download_result {
-          Ok(downloaded_pointer) => {
-            if downloaded_pointer.hash() != pointer.hash() {
-              error!(path = %local_path.display(), expected = %pointer, got = %downloaded_pointer, "checksum mismatch; removing downloaded object");
-              std::fs::remove_file(path)?;
-              return Err(RemoteError::ChecksumMismatch);
-            }
-
-            break;
-          }
-          Err(e) => {
-            error!(index = %index, attempt = %attempt, error = %e, "download failed; retrying");
-            attempt += 1;
+        let download_checksum_result = download_result.and_then(|p| {
+          if p.hash() != pointer.hash() {
+            error!(path = %local_path.display(), expected = %pointer, got = %p, "download: checksum mismatch");
             std::fs::remove_file(&path)?;
-            std::thread::sleep(delay);
+            Err(RemoteError::ChecksumMismatch)
+          } else {
+            Ok(p)
           }
+        });
+
+        if let Err(e) = download_checksum_result {
+          error!(index = %index, attempt = %attempt, error = %e, "download: failed, retrying");
+          attempt += 1;
+          std::fs::remove_file(&path)?;
+          std::thread::sleep(retry_delay);
+          continue;
         }
+
+        break;
       }
     }
     Ok(())
@@ -172,7 +175,9 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
   async fn upload_objects(&self, response: BatchResponse, pointers: &[Pointer]) -> Result<(), RemoteError> {
     let object_dir = self.repo.path().join("lfs/objects");
 
-    debug!(response = ?response);
+    debug!(response = ?response, "upload: got batch response");
+
+    let retry_delay = Duration::from_millis(500);
 
     for (index, object) in response.objects.into_iter().enumerate() {
       if let Some(error) = object.error {
@@ -180,7 +185,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
       }
 
       let Some(actions) = object.actions else {
-        warn!(index = %index, "push: server didn't want us to do anything with '{}' (actions is None); skip", object.oid);
+        debug!(index = %index, "upload: server didn't want us to do anything with '{}' (actions is None); skip", object.oid);
         continue;
       };
 
@@ -192,23 +197,22 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
         let content = std::fs::read(object_path)?;
 
         let mut attempt = 0;
-        let delay = Duration::from_millis(500);
 
         while attempt < 3 {
-          info!(index = %index, path = %rel_object_path.display(), upload = %upload_action.href, size = %content.len(), attempt = %attempt, "uploading lfs object");
+          debug!(index = %index, path = %rel_object_path.display(), upload = %upload_action.href, size = %content.len(), attempt = %attempt, "uploading lfs object");
           match self.client.upload(&upload_action, &content).await {
             Ok(()) => break,
             Err(e) => {
-              error!(index = %index, error = %e, "upload failed; retrying");
+              error!(index = %index, error = %e, "upload: failed, retrying");
               attempt += 1;
             }
           }
-          std::thread::sleep(delay);
+          std::thread::sleep(retry_delay);
         }
       }
 
       if let Some(verify_action) = actions.verify {
-        info!(index = %index, path = %rel_object_path.display(), verify = %verify_action.href, "verifying lfs object");
+        info!(index = %index, path = %rel_object_path.display(), verify = %verify_action.href, "upload: verifying lfs object");
         self.client.verify(&verify_action, pointer).await?;
       }
     }
