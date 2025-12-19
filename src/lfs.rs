@@ -129,8 +129,8 @@ impl LfsBuilder {
     filter
       .on_init(|_| Ok(()))
       .attributes(attributes)?
-      .on_check(move |_, _, src, attrs| {
-        if attrs.is_some() {
+      .on_check(move |_, _, src, attrs_set| {
+        if attrs_set {
           return Ok(true);
         }
 
