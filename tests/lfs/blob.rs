@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use assert_matches::assert_matches;
-use git2::ErrorCode;
 use git2_lfs::Pointer;
 use git2_lfs::ext::RepoLfsExt;
 use rstest::rstest;
@@ -50,7 +49,7 @@ fn repo_get_lfs_blob_content_returns_borrowed_bytes_for_regular_blob(
 }
 
 #[rstest]
-fn repo_get_lfs_blob_content_errors_when_missing_object(
+fn repo_get_lfs_pointer_if_object_missing(
   _sandbox: TempDir,
   #[with(&_sandbox)] repo: git2::Repository,
 ) -> Result<(), anyhow::Error> {
@@ -65,9 +64,10 @@ fn repo_get_lfs_blob_content_errors_when_missing_object(
   std::fs::remove_file(&object_path)?;
   assert!(!object_path.exists());
 
-  let err = repo.get_lfs_blob_content(&blob).expect_err("expected missing object error");
+  let resolved = repo.get_lfs_blob_content(&blob)?;
 
-  assert_matches!(err, git2_lfs::Error::Git2(err) if err.code() == ErrorCode::NotFound);
+  assert_matches!(resolved, Cow::Borrowed(_));
+  assert_eq!(resolved.as_ref(), pointer.as_bytes()?);
 
   Ok(())
 }

@@ -6,6 +6,7 @@ use crate::Pointer;
 
 use async_trait::async_trait;
 
+use futures::StreamExt;
 use tracing::*;
 
 pub use dto::*;
@@ -70,11 +71,16 @@ pub trait LfsRemote: Send + Sync {
 pub struct LfsClient<'a, C: Send + Sync> {
   repo: &'a git2::Repository,
   client: C,
+  concurrency_limit: usize,
 }
 
 impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
   pub fn new(repo: &'a git2::Repository, client: C) -> Self {
-    Self { repo, client }
+    Self { repo, client, concurrency_limit: 1 }
+  }
+
+  pub fn concurrency_limit(self, concurrency_limit: usize) -> Self {
+    Self { concurrency_limit, ..self }
   }
 
   pub async fn pull(&self, pointers: &[Pointer]) -> Result<(), RemoteError> {
@@ -115,15 +121,17 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
     let object_dir = self.repo.path().join("lfs/objects");
 
     debug!(response = ?response, "download: got batch response");
+    let total_objects = response.objects.len();
 
-    for (index, object) in response.objects.into_iter().enumerate() {
+    let futures = response.objects.into_iter().enumerate().map(async |(index, object)| {
+      let n = index + 1;
       if let Some(error) = object.error {
         return Err(RemoteError::ObjectError(format!("{} - {}", error.code, error.message)));
       }
 
       let Some(actions) = object.actions else {
-        debug!(index = %index, "download: server didn't want us to do anything with '{}' (actions is None); skip", object.oid);
-        continue;
+        debug!( "download ({}/{}): server didn't want us to do anything with '{}' (actions is None); skip", n, total_objects, object.oid);
+        return Ok(());
       };
 
       let download_action = actions.download.ok_or(RemoteError::EmptyResponse)?;
@@ -144,13 +152,13 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
         let mut buf = BufWriter::new(File::options().create_new(true).write(true).open(&path)?);
 
         let local_path = path.strip_prefix(&object_dir).unwrap_or(&path);
-        info!(index = %index, path = %local_path.display(), download = %download_action.href, size = %pointer.size(), "pull: downloading lfs object");
+        info!(url = %download_action.href, size = %pointer.size(), attempt = %attempt, "download ({}/{}): downloading lfs object", n, total_objects);
         let download_result = self.client.download(&download_action, &mut buf).await;
         drop(buf);
 
         let download_checksum_result = download_result.and_then(|p| {
           if p.hash() != pointer.hash() {
-            error!(path = %local_path.display(), expected = %pointer, got = %p, "download: checksum mismatch");
+            error!(path = %local_path.display(), expected = %pointer, got = %p, attempt = %attempt, "download ({}/{}): checksum mismatch", n, total_objects);
             std::fs::remove_file(&path)?;
             Err(RemoteError::ChecksumMismatch)
           } else {
@@ -159,7 +167,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
         });
 
         if let Err(e) = download_checksum_result {
-          error!(index = %index, attempt = %attempt, error = %e, "download: failed, retrying");
+          error!(error = %e, "download ({}/{}): failed, retrying", n, total_objects);
           attempt += 1;
           std::fs::remove_file(&path)?;
           std::thread::sleep(retry_delay);
@@ -168,7 +176,19 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 
         break;
       }
+
+      Ok(())
+    });
+
+    let r = futures::stream::iter(futures).buffer_unordered(self.concurrency_limit).collect::<Vec<_>>().await;
+    for r in r.iter().filter_map(|r| r.as_ref().err()) {
+      error!(error = %r, "download failed");
     }
+
+    if let Some(res) = r.into_iter().find_map(|r| r.err()) {
+      return Err(res);
+    }
+
     Ok(())
   }
 
@@ -179,31 +199,34 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 
     let retry_delay = Duration::from_millis(500);
 
-    for (index, object) in response.objects.into_iter().enumerate() {
-      if let Some(error) = object.error {
+    let total_objects = response.objects.len();
+
+    let futures = response.objects.iter().enumerate().map(async |(index, object)| {
+      let n = index + 1;
+      if let Some(error) = object.error.as_ref() {
         return Err(RemoteError::ObjectError(format!("{} - {}", error.code, error.message)));
       }
 
-      let Some(actions) = object.actions else {
-        debug!(index = %index, "upload: server didn't want us to do anything with '{}' (actions is None); skip", object.oid);
-        continue;
+      let Some(actions) = object.actions.as_ref() else {
+        debug!( "upload ({}/{}): server didn't want us to do anything with '{}' (actions is None); skip", n, total_objects, object.oid);
+        return Ok(());
       };
 
       let pointer = pointers.iter().find(|p| p.hex() == object.oid).ok_or(RemoteError::NotFound)?;
       let rel_object_path = pointer.path();
 
-      if let Some(upload_action) = actions.upload {
+      if let Some(upload_action) = actions.upload.as_ref() {
         let object_path = object_dir.join(&rel_object_path);
         let content = std::fs::read(object_path)?;
 
         let mut attempt = 0;
 
         while attempt < 3 {
-          debug!(index = %index, path = %rel_object_path.display(), upload = %upload_action.href, size = %content.len(), attempt = %attempt, "uploading lfs object");
+          debug!(url = %upload_action.href, size = %content.len(), attempt = %attempt, "uploading lfs object ({}/{})", n, total_objects);
           match self.client.upload(&upload_action, &content).await {
             Ok(()) => break,
             Err(e) => {
-              error!(index = %index, error = %e, "upload: failed, retrying");
+              error!( error = %e, "upload ({}/{}): failed, retrying", n, total_objects);
               attempt += 1;
             }
           }
@@ -211,10 +234,22 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
         }
       }
 
-      if let Some(verify_action) = actions.verify {
-        info!(index = %index, path = %rel_object_path.display(), verify = %verify_action.href, "upload: verifying lfs object");
+      if let Some(verify_action) = actions.verify.as_ref() {
+        info!(path = %rel_object_path.display(), verify = %verify_action.href, "upload ({}/{}): verifying lfs object", n, total_objects);
         self.client.verify(&verify_action, pointer).await?;
       }
+
+      Ok(())
+    });
+
+    let r = futures::stream::iter(futures).buffer_unordered(self.concurrency_limit).collect::<Vec<_>>().await;
+
+    for r in r.iter().filter_map(|r| r.as_ref().err()) {
+      error!(error = %r, "upload failed");
+    }
+
+    if let Some(res) = r.into_iter().find_map(|r| r.err()) {
+      return Err(res);
     }
 
     Ok(())

@@ -12,12 +12,12 @@ thiserror = "2.0.17"
 tracing = "0.1.41"
 url = "2.5.7"
 async-trait = "0.1"
+futures = { version = "0.3.31" }
 
 reqwest = { optional = true, version = "0.12.24", features = [
   "json",
   "stream",
 ] }
-futures = { optional = true, version = "0.3.31" }
 
 git2 = { git = "https://github.com/pashokitsme/git2-rs.git", branch = "filter", default-features = false, features = [
   "vendored-libgit2",
@@ -40,7 +40,7 @@ tokio = { version = "1", features = ["rt", "macros"] }
 [features]
 default = ["git2-https", "git2-ssh", "reqwest-backend"]
 
-reqwest-backend = ["reqwest", "futures"]
+reqwest-backend = ["reqwest"]
 git2-https = ["git2/https"]
 git2-ssh = ["git2/ssh"]
 git2-use-openssl = ["git2/use-openssl"]

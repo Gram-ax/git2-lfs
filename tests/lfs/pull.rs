@@ -33,7 +33,7 @@ async fn lfs_resolve_missing_objects(sandbox: TempDir) -> Result<(), anyhow::Err
   let tree = repo.head()?.peel_to_tree()?;
   let mut missing = repo.find_tree_missing_lfs_objects(&tree)?;
   missing.sort_by_key(|p| p.hex());
-  
+
   let mut missing = missing.iter();
 
   assert_eq!(missing.len(), 2, "expected 2 missing objects, got {:?}", missing);
