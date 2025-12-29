@@ -65,6 +65,7 @@ pub type Write = dyn std::io::Write + Send;
 pub type Read = dyn std::io::Read + Send;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum Progress {
   Download(ProgressEvent),
   Verify(ProgressEvent),
@@ -72,6 +73,7 @@ pub enum Progress {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ProgressEvent {
   pub total_objects: usize,
   pub total_bytes: usize,
@@ -197,13 +199,13 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
         let mut buf = BufWriter::new(File::options().create_new(true).write(true).open(&path)?);
 
         let local_path = path.strip_prefix(&object_dir).unwrap_or(&path);
-        info!(url = %download_action.href, size = %pointer.size(), attempt = %attempt, "download ({}/{})", n, total_objects);
+        info!(url = %download_action.href, size = %pointer.size(), "download ({}/{})", n, total_objects);
         let download_result = self.client.download(&download_action, &mut buf).await;
         drop(buf);
 
         let download_checksum_result = download_result.and_then(|p| {
           if p.hash() != pointer.hash() {
-            error!(path = %local_path.display(), expected = %pointer, got = %p, attempt = %attempt, "download ({}/{}): checksum mismatch", n, total_objects);
+            error!(path = %local_path.display(), expected = %pointer, got = %p, "download ({}/{}): checksum mismatch", n, total_objects);
             std::fs::remove_file(&path)?;
             Err(RemoteError::ChecksumMismatch)
           } else {
