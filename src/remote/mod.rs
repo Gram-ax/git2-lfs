@@ -64,14 +64,14 @@ pub enum RemoteError {
 pub type Write = dyn std::io::Write + Send;
 pub type Read = dyn std::io::Read + Send;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Progress {
   Download(ProgressEvent),
   Verify(ProgressEvent),
   Upload(ProgressEvent),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ProgressEvent {
   pub total_objects: usize,
   pub total_bytes: usize,
