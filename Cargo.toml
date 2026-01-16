@@ -20,7 +20,7 @@ reqwest = { optional = true, version = "0.12.24", features = [
   "stream",
 ] }
 
-git2 = { git = "https://github.com/pashokitsme/git2-rs.git", branch = "filter", default-features = false, features = [
+git2 = { git = "https://github.com/gram-ax/git2-rs.git", branch = "filter", default-features = false, features = [
   "vendored-libgit2",
 ] }
 
