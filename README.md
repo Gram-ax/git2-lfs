@@ -15,7 +15,7 @@ This crate depends on patched `git2` crate where bindings for [filters](https://
 And because of this, you're required to use the same feature-flags set for both `git2` and `git2-lfs` crates, see the example below:
 
 ```toml
-git2 = { git = "https://github.com/pashokitsme/git2-rs.git", branch = "filter", default-features = false, features = [
+git2 = { git = "https://github.com/gram-ax/git2-rs.git", branch = "filter", default-features = false, features = [
   "https",
   "ssh",
   "vendored-libgit2",
