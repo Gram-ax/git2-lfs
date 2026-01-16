@@ -90,7 +90,7 @@ impl<'a> Lfs<'a> {
     let path = self.object_dir().join(pointer.path());
 
     if !path.exists() {
-      warn!(path = %path.strip_prefix(&object_dir).unwrap_or(&path).display(), "object not found, skipping");
+      debug!(path = %path.strip_prefix(&object_dir).unwrap_or(&path).display(), "object not found, skipping");
       return Ok(false);
     }
 
