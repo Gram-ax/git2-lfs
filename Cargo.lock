@@ -391,7 +391,7 @@ dependencies = [
 [[package]]
 name = "git2"
 version = "0.21.0"
-source = "git+https://github.com/pashokitsme/git2-rs.git?branch=filter#3dec92bd17fc81b2d76c15919028b2de868dbacb"
+source = "git+https://github.com/gram-ax/git2-rs.git?branch=filter#3dec92bd17fc81b2d76c15919028b2de868dbacb"
 dependencies = [
  "bitflags",
  "libc",
@@ -756,7 +756,7 @@ checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
 [[package]]
 name = "libgit2-sys"
 version = "0.18.3+1.9.2"
-source = "git+https://github.com/pashokitsme/git2-rs.git?branch=filter#3dec92bd17fc81b2d76c15919028b2de868dbacb"
+source = "git+https://github.com/gram-ax/git2-rs.git?branch=filter#3dec92bd17fc81b2d76c15919028b2de868dbacb"
 dependencies = [
  "cc",
  "libc",
