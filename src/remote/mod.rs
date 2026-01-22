@@ -126,7 +126,7 @@ pub trait LfsRemote: Send + Sync {
 	async fn verify(&self, action: &ObjectAction, pointer: &Pointer) -> Result<(), RemoteError>;
 }
 
-pub struct LfsClient<'a, C: Send + Sync> {
+pub struct LfsClient<'a, C: LfsRemote + Send + Sync> {
 	repo: &'a git2::Repository,
 	client: C,
 	on_progress: Option<Box<OnProgress<'a>>>,
@@ -283,6 +283,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 			.buffer_unordered(self.concurrency_limit)
 			.collect::<Vec<_>>()
 			.await;
+
 		for r in r.iter().filter_map(|r| r.as_ref().err()) {
 			error!(error = %r, "download failed");
 		}
