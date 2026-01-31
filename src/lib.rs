@@ -16,10 +16,10 @@ pub enum Error {
 	#[error("resulting hash should be exactly 32 bytes, got {0}")]
 	InvalidHashLength(usize),
 
-	#[error("the pointer containts invalid spec, expected '{expected}', got '{actual}'")]
+	#[error("the pointer contains invalid spec, expected '{expected}', got '{actual}'")]
 	InvalidSpec { expected: String, actual: String },
 
-	#[error("the pointer containts invalid size: '{0}'")]
+	#[error("the pointer contains invalid size: '{0}'")]
 	InvalidSize(String),
 
 	#[error("not a pointer")]
