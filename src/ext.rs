@@ -15,7 +15,12 @@ pub trait RepoLfsExt {
 	fn get_lfs_blob_content<'r>(&self, blob: &'r git2::Blob<'_>) -> Result<Cow<'r, [u8]>, Error>;
 	fn find_tree_missing_lfs_objects(&self, tree: &git2::Tree<'_>) -> Result<Vec<Pointer>, Error>;
 	fn try_get_dangling_pointer(&self, rel_path: &Path) -> Result<Option<Pointer>, Error>;
-	fn find_lfs_objects_to_push(&self, local_branch: &git2::Reference, upstream_branch: Option<&git2::Reference>) -> Result<Vec<Pointer>, Error>;
+	fn find_lfs_objects_to_push(
+		&self,
+		local_branch: &git2::Reference,
+		upstream_branch: Option<&git2::Reference>,
+		limit: usize,
+	) -> Result<Vec<Pointer>, Error>;
 }
 
 pub trait RemoteLfsExt {
@@ -110,7 +115,12 @@ impl RepoLfsExt for git2::Repository {
 		Ok(missing.into_iter().collect())
 	}
 
-	fn find_lfs_objects_to_push(&self, local_branch: &git2::Reference, upstream_branch: Option<&git2::Reference>) -> Result<Vec<Pointer>, Error> {
+	fn find_lfs_objects_to_push(
+		&self,
+		local_branch: &git2::Reference,
+		upstream_branch: Option<&git2::Reference>,
+		limit: usize,
+	) -> Result<Vec<Pointer>, Error> {
 		let mut objects_to_push = HashSet::new();
 
 		let mut revwalk = self.revwalk()?;
@@ -121,7 +131,7 @@ impl RepoLfsExt for git2::Repository {
 			revwalk.hide(upstream_branch.peel_to_commit()?.id())?;
 		}
 
-		for commit in revwalk {
+		for commit in revwalk.take(limit) {
 			let commit = self.find_commit(commit?)?;
 			let tree = commit.tree()?;
 

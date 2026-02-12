@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::usize;
 
 use git2_lfs::ext::RepoLfsExt;
 use rstest::rstest;
@@ -34,7 +35,7 @@ fn lfs_find_objects_to_push(_sandbox: TempDir, #[with(&_sandbox)] repo: git2::Re
 	repo.commit(Some("HEAD"), &sig, &sig, "LFS", &tree, &[&parent_commit])?;
 
 	let head = repo.head()?;
-	let objects = repo.find_lfs_objects_to_push(&head, Some(&upstream))?;
+	let objects = repo.find_lfs_objects_to_push(&head, Some(&upstream), usize::MAX)?;
 
 	assert_eq!(objects.len(), 1, "expected 1 object");
 	assert_eq!(objects[0].size(), 100, "expected object size 100");
@@ -77,7 +78,7 @@ fn lfs_find_objects_to_push_multiple_commits(_sandbox: TempDir, #[with(&_sandbox
 	repo.commit(Some("HEAD"), &sig, &sig, "Add file2", &tree, &[&c1_commit])?;
 
 	let head = repo.head()?;
-	let objects = repo.find_lfs_objects_to_push(&head, Some(&upstream))?;
+	let objects = repo.find_lfs_objects_to_push(&head, Some(&upstream), usize::MAX)?;
 
 	assert_eq!(objects.len(), 2, "expected 2 objects");
 
