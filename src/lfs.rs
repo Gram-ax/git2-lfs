@@ -52,10 +52,9 @@ impl<'a> Lfs<'a> {
 			return Ok(false);
 		}
 
-		if let Some(pointer) = Pointer::from_str_short(input) {
+		if Pointer::is_pointer(input) {
 			warn!("clean: will not add a pointer file pointing to another pointer");
-			pointer.write_pointer(&mut out.as_allocated_vec())?;
-			return Ok(true);
+			return Ok(false);
 		}
 
 		let pointer = Pointer::from_blob_bytes(input)?;
