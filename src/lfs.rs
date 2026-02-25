@@ -52,6 +52,12 @@ impl<'a> Lfs<'a> {
 			return Ok(false);
 		}
 
+		if let Some(pointer) = Pointer::from_str_short(input) {
+			warn!("clean: will not add a pointer file pointing to another pointer");
+			pointer.write_pointer(&mut out.as_allocated_vec())?;
+			return Ok(true);
+		}
+
 		let pointer = Pointer::from_blob_bytes(input)?;
 		self.store_object_if_not_exists(&pointer, input)?;
 		pointer.write_pointer(&mut out.as_allocated_vec())?;
