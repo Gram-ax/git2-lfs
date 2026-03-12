@@ -10,23 +10,7 @@ You can find complete example of usage [here](https://github.com/Gram-ax/gramax/
 ### Usage
 This crate depends on patched `git2` crate where bindings for [filters](https://libgit2.org/docs/reference/main/filter/index.html) API are implemented.
 
-And because of this, you've to use the same patched crate and with the same feature-flags set in your project to avoid compilation conflicts. 
-
-Here's an example of dependencies in `Cargo.toml`:
-
-```toml
-git2 = { git = "https://github.com/gram-ax/git2-rs.git", branch = "filter", default-features = false, features = [
-  "https",
-  "ssh",
-  "vendored-libgit2",
-  # "use-openssl"
-] }
-
-git2-lfs = { git = "https://github.com/gram-ax/git2-lfs.git", features = [
-	# "git2-vendored-openssl",
-	# "git2-use-openssl",
-] }
-```
+So you have to use the re-exported `git2` crate from this crate instead of the original one.
 
 Next, you've to init lfs filter for libgit2.
 

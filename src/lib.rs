@@ -11,6 +11,8 @@ pub use sha2;
 pub use lfs::Lfs;
 pub use lfs::LfsBuilder;
 
+pub use git2;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
 	#[error("resulting hash should be exactly 32 bytes, got {0}")]
