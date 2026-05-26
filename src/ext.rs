@@ -43,19 +43,29 @@ impl RemoteLfsExt for Remote<'_> {
 
 impl RepoLfsExt for git2::Repository {
 	fn try_get_dangling_pointer(&self, rel_path: &Path) -> Result<Option<Pointer>, Error> {
-		let Some(workdir) = self.workdir() else {
-			return Ok(None);
-		};
-		let abs_path = workdir.join(rel_path);
+		match self.workdir() {
+			Some(workdir) => {
+				let abs_path = workdir.join(rel_path);
+				let size = abs_path.metadata()?.len() as usize;
 
-		let size = abs_path.metadata()?.len() as usize;
+				if !crate::pointer::POINTER_ROUGH_LEN.contains(&size) {
+					return Ok(None);
+				}
 
-		if !crate::pointer::POINTER_ROUGH_LEN.contains(&size) {
-			return Ok(None);
+				let content = std::fs::read(abs_path)?;
+				Ok(Pointer::from_str_short(&content))
+			}
+			None => {
+				let head = self.head()?.peel_to_tree()?;
+				let entry = head.get_path(rel_path)?;
+				let pointer = self
+					.find_blob(entry.id())
+					.ok()
+					.filter(|b| crate::pointer::POINTER_ROUGH_LEN.contains(&b.size()))
+					.and_then(|b| Pointer::from_str_short(b.content()));
+				Ok(pointer)
+			}
 		}
-
-		let content = std::fs::read(abs_path)?;
-		Ok(Pointer::from_str_short(&content))
 	}
 
 	fn get_lfs_blob_content<'r>(&self, blob: &'r git2::Blob<'_>) -> Result<Cow<'r, [u8]>, Error> {
