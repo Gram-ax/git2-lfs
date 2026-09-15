@@ -4,6 +4,7 @@ pub mod remote;
 mod lfs;
 mod pointer;
 
+pub use pointer::POINTER_ROUGH_LEN;
 pub use pointer::Pointer;
 
 pub use sha2;
