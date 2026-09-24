@@ -131,8 +131,9 @@ impl RepoLfsExt for git2::Repository {
 		upstream_branch: Option<&git2::Reference>,
 		limit: usize,
 	) -> Result<Vec<Pointer>, Error> {
-		let mut objects_to_push = HashSet::new();
+		let mut scan = PushScan::default();
 
+		let odb = self.odb()?;
 		let mut revwalk = self.revwalk()?;
 
 		revwalk.push(local_branch.peel_to_commit()?.id())?;
@@ -141,36 +142,93 @@ impl RepoLfsExt for git2::Repository {
 			revwalk.hide(upstream_branch.peel_to_commit()?.id())?;
 		}
 
+		let mut commits = 0usize;
+
 		for commit in revwalk.take(limit) {
 			let commit = self.find_commit(commit?)?;
 			let tree = commit.tree()?;
+			commits += 1;
 
-			tree.walk(git2::TreeWalkMode::PostOrder, |_, entry| {
-				let Some(ObjectType::Blob) = entry.kind() else {
-					return TreeWalkResult::Ok;
-				};
+			// only the changed paths matter: a blob that survived untouched from an earlier
+			// commit has already been inspected there (or lives in the hidden upstream part).
+			let Ok(parent) = commit.parent(0) else {
+				// root commit: there is nothing to diff against, walk the whole tree
+				tree.walk(git2::TreeWalkMode::PostOrder, |_, entry| {
+					let Some(ObjectType::Blob) = entry.kind() else {
+						return TreeWalkResult::Ok;
+					};
 
-				let oid = entry.id();
+					inspect_blob(self, &odb, entry.id(), commit.id(), &mut scan);
+					TreeWalkResult::Ok
+				})?;
 
-				let Ok(blob) = self.find_blob(oid) else {
-					return TreeWalkResult::Ok;
-				};
+				continue;
+			};
 
-				if !POINTER_ROUGH_LEN.contains(&blob.size()) {
-					return TreeWalkResult::Ok;
+			let parent_tree = parent.tree()?;
+			let diff = self.diff_tree_to_tree(Some(&parent_tree), Some(&tree), None)?;
+
+			for delta in diff.deltas() {
+				let oid = delta.new_file().id();
+
+				if oid.is_zero() {
+					continue;
 				}
 
-				let Ok(pointer) = Pointer::from_str(String::from_utf8_lossy(blob.content()).as_ref()) else {
-					debug!(oid = %oid, "skipping non-lfs pointer file");
-					return TreeWalkResult::Ok;
-				};
-
-				debug!(blob = %oid, commit = %commit.id(), "found lfs-pointer!");
-				objects_to_push.insert(pointer);
-				TreeWalkResult::Ok
-			})?;
+				inspect_blob(self, &odb, oid, commit.id(), &mut scan);
+			}
 		}
 
-		Ok(objects_to_push.into_iter().collect())
+		info!(
+			commits = commits,
+			blobs_inspected = scan.blobs_inspected,
+			headers_read = scan.headers_read,
+			pointers = scan.objects_to_push.len(),
+			"lfs: scanned commits for objects to push"
+		);
+
+		Ok(scan.objects_to_push.into_iter().collect())
 	}
+}
+
+#[derive(Default)]
+struct PushScan {
+	seen: HashSet<Oid>,
+	objects_to_push: HashSet<Pointer>,
+	blobs_inspected: usize,
+	headers_read: usize,
+}
+
+/// Checks whether `oid` is an lfs pointer and, if so, records it in `scan`.
+///
+/// The object header (type and size) is cheap to read compared to the object itself, so the
+/// full blob is only loaded for oids that are of the right type and of a plausible size.
+fn inspect_blob(repo: &git2::Repository, odb: &Odb<'_>, oid: Oid, commit: Oid, scan: &mut PushScan) {
+	scan.blobs_inspected += 1;
+
+	if !scan.seen.insert(oid) {
+		return;
+	}
+
+	scan.headers_read += 1;
+
+	let Ok((size, kind)) = odb.read_header(oid) else {
+		return;
+	};
+
+	if kind != ObjectType::Blob || !POINTER_ROUGH_LEN.contains(&size) {
+		return;
+	}
+
+	let Ok(blob) = repo.find_blob(oid) else {
+		return;
+	};
+
+	let Ok(pointer) = Pointer::from_str(String::from_utf8_lossy(blob.content()).as_ref()) else {
+		debug!(oid = %oid, "skipping non-lfs pointer file");
+		return;
+	};
+
+	debug!(blob = %oid, commit = %commit, "found lfs-pointer!");
+	scan.objects_to_push.insert(pointer);
 }
