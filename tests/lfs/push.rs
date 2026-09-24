@@ -88,3 +88,50 @@ fn lfs_find_objects_to_push_multiple_commits(_sandbox: TempDir, #[with(&_sandbox
 
 	Ok(())
 }
+
+#[rstest]
+fn lfs_find_objects_to_push_untouched_and_empty_commits(_sandbox: TempDir, #[with(&_sandbox)] repo: git2::Repository) -> Result<(), anyhow::Error> {
+	let workdir = repo.workdir().unwrap();
+	let sig = repo.signature()?;
+
+	let readme = workdir.join("README.md");
+	std::fs::write(&readme, "root")?;
+
+	let mut index = repo.index()?;
+	index.add_path(Path::new("README.md"))?;
+	let oid = index.write_tree()?;
+	let tree = repo.find_tree(oid)?;
+	let parent_id = repo.commit(Some("HEAD"), &sig, &sig, "Initial", &tree, &[])?;
+	let parent_commit = repo.find_commit(parent_id)?;
+
+	let upstream = repo.reference("refs/remotes/origin/master", parent_id, true, "upstream")?;
+
+	// Commit 1: adds the only lfs file of the branch.
+	let bin = workdir.join("file.bin");
+	std::fs::write(&bin, vec![7u8; 300])?;
+	index.add_path(Path::new("file.bin"))?;
+	let oid = index.write_tree()?;
+	let tree = repo.find_tree(oid)?;
+	let c1_id = repo.commit(Some("HEAD"), &sig, &sig, "Add file.bin", &tree, &[&parent_commit])?;
+	let c1_commit = repo.find_commit(c1_id)?;
+
+	// Commit 2: touches a plain text file, leaves file.bin untouched.
+	std::fs::write(&readme, "root, edited")?;
+	index.add_path(Path::new("README.md"))?;
+	let oid = index.write_tree()?;
+	let tree = repo.find_tree(oid)?;
+	let c2_id = repo.commit(Some("HEAD"), &sig, &sig, "Edit README", &tree, &[&c1_commit])?;
+	let c2_commit = repo.find_commit(c2_id)?;
+
+	// Commit 3: changes nothing at all — same tree as its parent.
+	let tree = c2_commit.tree()?;
+	repo.commit(Some("HEAD"), &sig, &sig, "Empty", &tree, &[&c2_commit])?;
+
+	let head = repo.head()?;
+	let objects = repo.find_lfs_objects_to_push(&head, Some(&upstream), usize::MAX)?;
+
+	assert_eq!(objects.len(), 1, "expected the untouched lfs object exactly once");
+	assert_eq!(objects[0].size(), 300, "expected object size 300");
+
+	Ok(())
+}
