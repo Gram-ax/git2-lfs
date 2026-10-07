@@ -1,10 +1,9 @@
-use std::fs::File;
-use std::io::BufWriter;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::Pointer;
+use crate::object::ObjectWriter;
 
 use async_trait::async_trait;
 
@@ -21,6 +20,8 @@ mod dto;
 pub mod reqwest;
 
 pub const MEDIA_TYPE: &str = "application/vnd.git-lfs+json";
+
+const DOWNLOAD_ATTEMPTS: usize = 3;
 
 #[derive(thiserror::Error, Debug)]
 pub enum RemoteError {
@@ -45,8 +46,13 @@ pub enum RemoteError {
 	#[error("verify failed: {0}")]
 	Verify(String),
 
+	/// For [`LfsRemote`] implementations that check the checksum themselves; [`LfsClient`] reports a
+	/// mismatch of what it wrote as [`RemoteError::Object`].
 	#[error("checksum mismatch")]
 	ChecksumMismatch,
+
+	#[error(transparent)]
+	Object(#[from] crate::object::ObjectWriteError),
 
 	#[error("empty response")]
 	EmptyResponse,
@@ -199,6 +205,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 
 	async fn download_objects(&self, response: BatchResponse, pointers: &[Pointer]) -> Result<(), RemoteError> {
 		let object_dir = self.repo.path().join("lfs/objects");
+		crate::object::remove_stale_tmp_files(&object_dir);
 
 		debug!(response = ?response, "download: got batch response");
 		let total_objects = response.objects.len();
@@ -237,43 +244,35 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 
 			let pointer = pointers.iter().find(|p| p.hex() == object.oid).ok_or(RemoteError::NotFound)?;
 
-			let path = object_dir.join(pointer.path());
-			std::fs::create_dir_all(path.parent().unwrap())?;
-
-			let mut attempt = 0;
 			let retry_delay = Duration::from_millis(500);
+			let mut attempt = 0;
 
-			while attempt < 3 {
-				if path.exists() {
-					std::fs::remove_file(&path)?;
-				}
+			loop {
+				attempt += 1;
+				info!(url = %download_action.href, size = %pointer.size(), attempt = %attempt, "download ({}/{})", n, total_objects);
 
-				let mut buf = BufWriter::new(File::options().create_new(true).write(true).open(&path)?);
+				// the object reaches its path only through commit, once it matches the pointer; a failed or
+				// cancelled download drops the writer, which removes what was written so far
+				let download = async {
+					let mut writer = ObjectWriter::create(&object_dir, pointer)?;
+					self.client.download(&download_action, &mut writer).await?;
+					writer.commit()?;
+					Ok::<_, RemoteError>(())
+				};
 
-				let local_path = path.strip_prefix(&object_dir).unwrap_or(&path);
-				info!(url = %download_action.href, size = %pointer.size(), "download ({}/{})", n, total_objects);
-				let download_result = self.client.download(&download_action, &mut buf).await;
-				drop(buf);
-
-				let download_checksum_result = download_result.and_then(|p| {
-					if p.hash() != pointer.hash() {
-						error!(path = %local_path.display(), expected = %pointer, got = %p, "download ({}/{}): checksum mismatch", n, total_objects);
-						std::fs::remove_file(&path)?;
-						Err(RemoteError::ChecksumMismatch)
-					} else {
-						Ok(p)
+				match download.await {
+					Ok(()) => break,
+					Err(e) if attempt < DOWNLOAD_ATTEMPTS => {
+						error!(path = %pointer.path().display(), error = %e, "download ({}/{}): failed, retrying", n, total_objects);
+						std::thread::sleep(retry_delay);
 					}
-				});
-
-				if let Err(e) = download_checksum_result {
-					error!(error = %e, "download ({}/{}): failed, retrying", n, total_objects);
-					attempt += 1;
-					std::fs::remove_file(&path)?;
-					std::thread::sleep(retry_delay);
-					continue;
+					// as before: an object that keeps failing is left missing, not turned into a failed pull, so a
+					// clone or sync still completes and the object is pulled the next time it is needed
+					Err(e) => {
+						error!(path = %pointer.path().display(), error = %e, "download ({}/{}): failed {} times, giving up", n, total_objects, attempt);
+						break;
+					}
 				}
-
-				break;
 			}
 
 			Ok(())
