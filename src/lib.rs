@@ -2,10 +2,13 @@ pub mod ext;
 pub mod remote;
 
 mod lfs;
+mod object;
 mod pointer;
 
 pub use pointer::POINTER_ROUGH_LEN;
 pub use pointer::Pointer;
+
+pub use object::ObjectWriteError;
 
 pub use sha2;
 
@@ -36,6 +39,9 @@ pub enum Error {
 
 	#[error("remote: {0}")]
 	Remote(#[from] crate::remote::RemoteError),
+
+	#[error(transparent)]
+	Object(#[from] crate::object::ObjectWriteError),
 
 	#[error(transparent)]
 	Git2(#[from] git2::Error),

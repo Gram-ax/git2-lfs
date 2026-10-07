@@ -12,6 +12,7 @@ use crate::repo;
 use crate::sandbox;
 
 mod blob;
+mod download;
 mod pull;
 mod push;
 

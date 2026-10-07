@@ -1,6 +1,5 @@
 use std::fmt::Display;
 
-use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -102,15 +101,20 @@ impl Pointer {
 		Ok(bytes)
 	}
 
+	/// Writes `bytes` as this pointer's object to `<absolute_object_dir>/<aa>/<bb>/<oid>`, replacing
+	/// whatever file is there. The bytes go through a temporary file and reach the object's path only
+	/// if they match the pointer, so the path never holds a partial object.
 	pub fn write_blob_bytes(&self, absolute_object_dir: &Path, bytes: &[u8]) -> Result<(), Error> {
-		let file = absolute_object_dir.join(self.path());
-		std::fs::create_dir_all(file.parent().unwrap())?;
-
-		info!(path = %file.display(), "writing lfs object");
-
-		let mut file = std::fs::File::options().create_new(true).write(true).open(&file)?;
-		BufWriter::new(&mut file).write_all(bytes)?;
+		info!(path = %absolute_object_dir.join(self.path()).display(), "writing lfs object");
+		crate::object::write_object(absolute_object_dir, self, bytes)?;
 		Ok(())
+	}
+
+	/// Whether `absolute_object_dir` holds this pointer's object in full: a file of the pointer's size
+	/// at [`Pointer::path`]. A shorter file there, left by a download interrupted before downloads went
+	/// through a temporary file, counts as missing, so it gets downloaded again.
+	pub fn is_object_present(&self, absolute_object_dir: &Path) -> bool {
+		crate::object::is_complete(&absolute_object_dir.join(self.path()), self)
 	}
 
 	pub fn from_str_short(bytes: &[u8]) -> Option<Self> {

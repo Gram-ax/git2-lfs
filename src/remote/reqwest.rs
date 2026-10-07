@@ -126,7 +126,8 @@ impl LfsRemote for ReqwestLfsClient {
 
 		while let Some(chunk) = bytes.next().await {
 			let chunk = chunk.map_err(|e| RemoteError::Download(crate::report_error(&e)))?;
-			total += to.write(&chunk)?;
+			to.write_all(&chunk)?;
+			total += chunk.len();
 			checksum.update(&chunk);
 		}
 

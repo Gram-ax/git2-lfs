@@ -73,12 +73,14 @@ impl RepoLfsExt for git2::Repository {
 			return Ok(Cow::Borrowed(blob.content()));
 		};
 
-		let path = self.path().join("lfs/objects").join(pointer.path());
+		let object_dir = self.path().join("lfs/objects");
 
-		if !path.exists() {
-			warn!(pointer = %pointer, "lfs object not found; returning the original content");
+		if !pointer.is_object_present(&object_dir) {
+			warn!(pointer = %pointer, "lfs object not found or incomplete; returning the original content");
 			return Ok(Cow::Borrowed(blob.content()));
 		}
+
+		let path = object_dir.join(pointer.path());
 
 		let content = std::fs::read(path)?;
 		Ok(Cow::Owned(content))
@@ -86,6 +88,7 @@ impl RepoLfsExt for git2::Repository {
 
 	fn find_tree_missing_lfs_objects(&self, tree: &git2::Tree<'_>) -> Result<Vec<Pointer>, Error> {
 		let mut missing = HashSet::<Pointer>::new();
+		let object_dir = self.path().join("lfs/objects");
 
 		tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
 			let Some(ObjectType::Blob) = entry.kind() else {
@@ -106,7 +109,7 @@ impl RepoLfsExt for git2::Repository {
 			};
 
 			match Pointer::from_str_short(blob.content()) {
-				Some(pointer) if !self.path().join("lfs/objects").join(pointer.path()).exists() => {
+				Some(pointer) if !pointer.is_object_present(&object_dir) => {
 					debug!(
 						"blob '{}' ({}{}) is lfs pointer but object is missing",
 						oid,

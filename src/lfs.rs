@@ -79,10 +79,8 @@ impl<'a> Lfs<'a> {
 	}
 
 	fn store_object_if_not_exists(self, pointer: &Pointer, bytes: &[u8]) -> Result<(), Error> {
-		let path = self.object_dir().join(pointer.path());
-
-		if path.exists() {
-			debug!(path = %path.display(), "object already exists, skipping");
+		if pointer.is_object_present(&self.object_dir()) {
+			debug!(path = %pointer.path().display(), "object already exists, skipping");
 			return Ok(());
 		}
 
@@ -94,8 +92,8 @@ impl<'a> Lfs<'a> {
 		let object_dir = self.object_dir();
 		let path = self.object_dir().join(pointer.path());
 
-		if !path.exists() {
-			debug!(path = %path.strip_prefix(&object_dir).unwrap_or(&path).display(), "object not found, skipping");
+		if !pointer.is_object_present(&object_dir) {
+			debug!(path = %path.strip_prefix(&object_dir).unwrap_or(&path).display(), "object not found or incomplete, skipping");
 			return Ok(false);
 		}
 
