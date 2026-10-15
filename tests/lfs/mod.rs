@@ -15,6 +15,7 @@ mod blob;
 mod download;
 mod pull;
 mod push;
+mod upload;
 
 #[rstest]
 fn lfs_ignore_nonlfs_files(sandbox: TempDir, #[with(&sandbox)] repo: git2::Repository) -> Result<(), anyhow::Error> {

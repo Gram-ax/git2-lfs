@@ -1,3 +1,4 @@
+use std::pin::pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -8,13 +9,19 @@ use crate::object::ObjectWriter;
 use async_trait::async_trait;
 
 use futures::StreamExt;
+use futures::future::Either;
 use serde::Deserialize;
 use serde::Serialize;
 use tracing::*;
 
 pub use dto::*;
+pub use upload_progress::UploadProgress;
 
 mod dto;
+mod upload_progress;
+
+use upload_progress::UploadMessage;
+use upload_progress::UploadTracker;
 
 #[cfg(all(feature = "reqwest-backend", not(target_family = "wasm")))]
 pub mod reqwest;
@@ -128,7 +135,8 @@ impl Progress {
 pub trait LfsRemote: Send + Sync {
 	async fn batch(&self, req: BatchRequest) -> Result<BatchResponse, RemoteError>;
 	async fn download(&self, action: &ObjectAction, to: &mut Write) -> Result<Pointer, RemoteError>;
-	async fn upload(&self, action: &ObjectAction, blob: &[u8]) -> Result<(), RemoteError>;
+	/// Sends `blob` and reports through `progress` how much of it is sent; see [`UploadProgress`].
+	async fn upload(&self, action: &ObjectAction, blob: &[u8], progress: UploadProgress) -> Result<(), RemoteError>;
 	async fn verify(&self, action: &ObjectAction, pointer: &Pointer) -> Result<(), RemoteError>;
 }
 
@@ -300,15 +308,28 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 		debug!(response = ?response, "upload: got batch response");
 
 		let retry_delay = Duration::from_millis(500);
+		let total = response.objects.len();
 
-		let total_objects = response.objects.len();
-		let total_bytes = response.objects.iter().map(|o| o.size).sum::<u64>() as usize;
-		let handled_bytes = AtomicUsize::new(0);
-		let handled_objects = AtomicUsize::new(0);
+		// only the objects the server asked to upload count towards the totals, each under its index in the tracker
+		let mut to_upload = 0;
+		let objects = response
+			.objects
+			.into_iter()
+			.map(|object| {
+				let wants_upload = object.error.is_none() && object.actions.as_ref().is_some_and(|a| a.upload.is_some());
+				let index = wants_upload.then(|| {
+					to_upload += 1;
+					to_upload - 1
+				});
+				(index, object)
+			})
+			.collect::<Vec<_>>();
 
-		let futures = response.objects.into_iter().map(async |object| {
-			let n = handled_objects.fetch_add(1, Ordering::Relaxed) + 1;
-			let handled_bytes = handled_bytes.fetch_add(object.size as usize, Ordering::Relaxed);
+		let mut tracker = UploadTracker::new(objects.iter().filter(|(index, _)| index.is_some()).map(|(_, o)| o.size as usize));
+		let (tx, mut rx) = futures::channel::mpsc::unbounded();
+
+		let futures = objects.into_iter().enumerate().map(async |(i, (index, object))| {
+			let n = i + 1;
 
 			if let Some(error) = object.error.as_ref() {
 				return Err(RemoteError::ObjectError(format!("{} - {}", error.code, error.message)));
@@ -317,38 +338,31 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 			let Some(actions) = object.actions.as_ref() else {
 				debug!(
 					"upload ({}/{}): server didn't want us to do anything with '{}' (actions is None); skip",
-					n, total_objects, object.oid
+					n, total, object.oid
 				);
 				return Ok(());
 			};
 
-			if let Some(on_progress) = &self.on_progress {
-				let event = ProgressEvent {
-					total_objects,
-					total_bytes,
-					bytes_handled: handled_bytes,
-					objects_handled: n - 1,
-					next_object_size: object.size as usize,
-				};
-
-				on_progress(Progress::Upload(event));
-			}
-
 			let pointer = pointers.iter().find(|p| p.hex() == object.oid).ok_or(RemoteError::NotFound)?;
 			let rel_object_path = pointer.path();
 
-			if let Some(upload_action) = actions.upload.as_ref() {
+			if let (Some(index), Some(upload_action)) = (index, actions.upload.as_ref()) {
 				let object_path = object_dir.join(&rel_object_path);
 				let content = std::fs::read(object_path)?;
 
 				let mut attempt = 0;
 
 				while attempt < 3 {
-					debug!(url = %upload_action.href, size = %content.len(), attempt = %attempt, "upload ({}/{})", n, total_objects);
-					match self.client.upload(&upload_action, &content).await {
-						Ok(()) => break,
+					debug!(url = %upload_action.href, size = %content.len(), attempt = %attempt, "upload ({}/{})", n, total);
+					_ = tx.unbounded_send(UploadMessage::Started { object: index, attempt });
+					let progress = UploadProgress::new(index, attempt, tx.clone());
+					match self.client.upload(upload_action, &content, progress).await {
+						Ok(()) => {
+							_ = tx.unbounded_send(UploadMessage::Uploaded { object: index });
+							break;
+						}
 						Err(e) => {
-							error!( error = %e, "upload ({}/{}): failed, retrying", n, total_objects);
+							error!( error = %e, "upload ({}/{}): failed, retrying", n, total);
 							attempt += 1;
 						}
 					}
@@ -357,29 +371,47 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 			}
 
 			if let Some(verify_action) = actions.verify.as_ref() {
-				if let Some(on_progress) = &self.on_progress {
-					let event = ProgressEvent {
-						total_objects,
-						total_bytes,
-						bytes_handled: handled_bytes,
-						objects_handled: n - 1,
-						next_object_size: object.size as usize,
-					};
+				_ = tx.unbounded_send(UploadMessage::Verify { size: object.size as usize });
 
-					on_progress(Progress::Verify(event));
-				}
-
-				info!(path = %rel_object_path.display(), verify = %verify_action.href, "upload ({}/{}): verifying lfs object", n, total_objects);
-				self.client.verify(&verify_action, pointer).await?;
+				info!(path = %rel_object_path.display(), verify = %verify_action.href, "upload ({}/{}): verifying lfs object", n, total);
+				self.client.verify(verify_action, pointer).await?;
 			}
 
 			Ok(())
 		});
 
-		let r = futures::stream::iter(futures)
+		// events go out here, in the task that runs the push: `on_progress` is not `Send`, and an upload may
+		// report from another task (the reqwest body is polled by the connection's task)
+		let mut emit = |message| {
+			if let (Some(on_progress), Some(event)) = (&self.on_progress, tracker.handle(message)) {
+				on_progress(event);
+			}
+		};
+
+		let uploads = futures::stream::iter(futures)
 			.buffer_unordered(self.concurrency_limit)
-			.collect::<Vec<_>>()
-			.await;
+			.collect::<Vec<_>>();
+		let drain = async {
+			while let Some(message) = rx.next().await {
+				emit(message);
+			}
+		};
+
+		let r = match futures::future::select(pin!(uploads), pin!(drain)).await {
+			Either::Left((r, _)) => r,
+			// `tx` is alive, so the channel doesn't close
+			Either::Right(((), uploads)) => uploads.await,
+		};
+
+		// an upload may keep its `UploadProgress` past its end (hyper drops a request body when it likes), so the
+		// channel is not waited to close: what has been reported is taken, a later report is lost
+		while let Ok(Some(message)) = rx.try_next() {
+			emit(message);
+		}
+
+		if let (Some(on_progress), Some(event)) = (&self.on_progress, tracker.finish()) {
+			on_progress(event);
+		}
 
 		for r in r.iter().filter_map(|r| r.as_ref().err()) {
 			error!(error = %r, "upload failed");

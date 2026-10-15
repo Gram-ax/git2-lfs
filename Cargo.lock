@@ -410,6 +410,7 @@ dependencies = [
  "assert_matches",
  "assertables",
  "async-trait",
+ "bytes",
  "copy_dir",
  "ctor",
  "futures",
