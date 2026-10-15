@@ -354,7 +354,6 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 
 				while attempt < 3 {
 					debug!(url = %upload_action.href, size = %content.len(), attempt = %attempt, "upload ({}/{})", n, total);
-					_ = tx.unbounded_send(UploadMessage::Started { object: index, attempt });
 					let progress = UploadProgress::new(index, attempt, tx.clone());
 					match self.client.upload(upload_action, &content, progress).await {
 						Ok(()) => {
@@ -371,8 +370,6 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 			}
 
 			if let Some(verify_action) = actions.verify.as_ref() {
-				_ = tx.unbounded_send(UploadMessage::Verify { size: object.size as usize });
-
 				info!(path = %rel_object_path.display(), verify = %verify_action.href, "upload ({}/{}): verifying lfs object", n, total);
 				self.client.verify(verify_action, pointer).await?;
 			}
@@ -380,8 +377,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 			Ok(())
 		});
 
-		// events go out here, in the task that runs the push: `on_progress` is not `Send`, and an upload may
-		// report from another task (the reqwest body is polled by the connection's task)
+		// `on_progress` is not `Send`, so events go out here, in the task that runs the push
 		let mut emit = |message| {
 			if let (Some(on_progress), Some(event)) = (&self.on_progress, tracker.handle(message)) {
 				on_progress(event);
@@ -403,14 +399,10 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 			Either::Right(((), uploads)) => uploads.await,
 		};
 
-		// an upload may keep its `UploadProgress` past its end (hyper drops a request body when it likes), so the
-		// channel is not waited to close: what has been reported is taken, a later report is lost
+		// not waiting for the channel to close: an upload may keep its `UploadProgress` past its end, as hyper
+		// does with a request body
 		while let Ok(Some(message)) = rx.try_next() {
 			emit(message);
-		}
-
-		if let (Some(on_progress), Some(event)) = (&self.on_progress, tracker.finish()) {
-			on_progress(event);
 		}
 
 		for r in r.iter().filter_map(|r| r.as_ref().err()) {
