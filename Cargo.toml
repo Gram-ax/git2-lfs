@@ -19,6 +19,7 @@ reqwest = { optional = true, version = "0.12.24", features = [
   "json",
   "stream",
 ] }
+bytes = { optional = true, version = "1" }
 
 git2 = { git = "https://github.com/gram-ax/git2-rs.git", rev = "42ec1a8f11a9c1ea85dfc422cc0ca045b8c9832f", default-features = false, features = [
   "vendored-libgit2",
@@ -35,13 +36,13 @@ rstest = "0.26.1"
 more-asserts = "0.3.1"
 ctor = "0.6.1"
 copy_dir = "0.1.3"
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 
 
 [features]
 default = ["git2-https", "git2-ssh", "reqwest-backend"]
 
-reqwest-backend = ["reqwest"]
+reqwest-backend = ["reqwest", "dep:bytes"]
 git2-https = ["git2/https"]
 git2-ssh = ["git2/ssh"]
 git2-use-openssl = ["git2/use-openssl"]

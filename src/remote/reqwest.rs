@@ -1,8 +1,11 @@
 use crate::Pointer;
 use crate::remote::LfsRemote;
+use crate::remote::UploadProgress;
 use crate::remote::Write;
 use crate::remote::dto::BatchResponse;
 
+use bytes::Bytes;
+use reqwest::header::CONTENT_LENGTH;
 use reqwest::header::HeaderMap;
 use url::Url;
 
@@ -17,6 +20,8 @@ use crate::remote::MEDIA_TYPE;
 use crate::remote::dto::*;
 
 const USER_AGENT: &str = "gx-lfs/0.0.0";
+
+const UPLOAD_CHUNK: usize = 64 * 1024;
 
 trait ReqwestExt {
 	async fn or_err<T: FnOnce(String) -> RemoteError>(self, or_else: T) -> Result<reqwest::Response, RemoteError>;
@@ -67,6 +72,18 @@ impl ReqwestExt for Result<reqwest::Response, reqwest::Error> {
 
 		Ok(res)
 	}
+}
+
+/// `blob` in chunks, each reported to `progress` as hyper takes it to send.
+fn upload_body(blob: &[u8], progress: UploadProgress) -> reqwest::Body {
+	let blob = Bytes::copy_from_slice(blob);
+	let chunks = (0..blob.len()).step_by(UPLOAD_CHUNK).map(move |start| {
+		let end = (start + UPLOAD_CHUNK).min(blob.len());
+		progress.sent(end);
+		Ok::<_, std::io::Error>(blob.slice(start..end))
+	});
+
+	reqwest::Body::wrap_stream(futures::stream::iter(chunks))
 }
 
 #[async_trait]
@@ -136,7 +153,7 @@ impl LfsRemote for ReqwestLfsClient {
 		Ok(Pointer::from_parts(hash.as_slice(), total))
 	}
 
-	async fn upload(&self, action: &ObjectAction, blob: &[u8]) -> Result<(), RemoteError> {
+	async fn upload(&self, action: &ObjectAction, blob: &[u8], progress: UploadProgress) -> Result<(), RemoteError> {
 		let mut req = self.client.put(&action.href);
 
 		for (key, value) in action.header.iter() {
@@ -144,7 +161,10 @@ impl LfsRemote for ReqwestLfsClient {
 		}
 
 		req = req.header("User-Agent", USER_AGENT);
-		req.body(blob.to_owned()).send().await.or_err(RemoteError::Upload).await?;
+		// a streamed body has no length of its own, and hyper sends a body without one chunked, which not every
+		// lfs server accepts; a `Transfer-Encoding` the server asked for in the action's headers still wins
+		req = req.header(CONTENT_LENGTH, blob.len());
+		req.body(upload_body(blob, progress)).send().await.or_err(RemoteError::Upload).await?;
 
 		Ok(())
 	}
