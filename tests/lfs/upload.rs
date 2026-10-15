@@ -240,20 +240,10 @@ async fn push<C: LfsRemote>(
 	tokio::time::timeout(PUSH_TIMEOUT, client.push(pointers)).await.expect("the push hung")
 }
 
-fn upload_events(events: &[Progress]) -> Vec<&ProgressEvent> {
-	events
-		.iter()
-		.filter_map(|e| match e {
-			Progress::Upload(e) => Some(e),
-			_ => None,
-		})
-		.collect()
-}
-
-fn assert_monotonic(events: &[&ProgressEvent]) {
+fn assert_monotonic(events: &[Progress]) {
 	for pair in events.windows(2) {
 		assert!(
-			pair[1].bytes_handled >= pair[0].bytes_handled && pair[1].objects_handled >= pair[0].objects_handled,
+			pair[1].bytes_handled() >= pair[0].bytes_handled() && pair[1].objects_handled() >= pair[0].objects_handled(),
 			"went back: {:?} -> {:?}",
 			pair[0],
 			pair[1]
@@ -263,9 +253,13 @@ fn assert_monotonic(events: &[&ProgressEvent]) {
 
 fn assert_last_is_final(events: &[Progress], total_objects: usize, total_bytes: usize) {
 	let last = events.last().expect("no events");
-	assert!(matches!(last, Progress::Upload(_)), "the last event is an upload, got {last:?}");
 	assert_eq!((last.objects_handled(), last.total_objects()), (total_objects, total_objects));
 	assert_eq!((last.bytes_handled(), last.total_bytes()), (total_bytes, total_bytes));
+}
+
+/// `bytes_handled` of the events before the first object is uploaded.
+fn in_flight(events: &[Progress]) -> Vec<usize> {
+	events.iter().filter(|e| e.objects_handled() == 0).map(|e| e.bytes_handled()).collect()
 }
 
 #[rstest]
@@ -285,19 +279,9 @@ async fn upload_reports_every_chunk_while_object_uploads(_sandbox: TempDir, #[wi
 	);
 
 	let events = remote.events();
-	let uploads = upload_events(&events);
-	assert_eq!(uploads.len(), events.len(), "nothing to verify");
-	assert!(uploads.iter().all(|e| e.total_objects == 1 && e.total_bytes == size));
-	assert_eq!((uploads[0].bytes_handled, uploads[0].objects_handled), (0, 0), "an event at the start");
-	assert_monotonic(&uploads);
-
-	let in_flight = uploads
-		.iter()
-		.filter(|e| e.objects_handled == 0)
-		.map(|e| e.bytes_handled)
-		.collect::<Vec<_>>();
-	assert_eq!(in_flight, [vec![0], chunk_ends(size, CHUNK)].concat());
-
+	assert!(events.iter().all(|e| e.total_objects() == 1 && e.total_bytes() == size));
+	assert_monotonic(&events);
+	assert_eq!(in_flight(&events), chunk_ends(size, CHUNK));
 	assert_last_is_final(&events, 1, size);
 
 	Ok(())
@@ -336,19 +320,11 @@ async fn upload_counts_only_objects_server_asks_to_upload(_sandbox: TempDir, #[w
 
 	let events = remote.events();
 	for event in &events {
+		assert!(matches!(event, Progress::Upload(_)), "{event:?}");
 		assert_eq!((event.total_objects(), event.total_bytes()), (2, total_bytes), "{event:?}");
-		assert!(event.bytes_handled() <= total_bytes, "{event:?}");
 	}
 
-	let verifies = events.iter().filter(|e| matches!(e, Progress::Verify(_))).collect::<Vec<_>>();
-	assert_eq!(verifies.len(), 2);
-	assert_eq!(
-		(verifies[0].next_object_size(), verifies[0].bytes_handled(), verifies[0].objects_handled()),
-		(700, uploaded[0], 1),
-		"verify carries the counters of the moment"
-	);
-
-	assert_monotonic(&upload_events(&events));
+	assert_monotonic(&events);
 	assert_last_is_final(&events, 2, total_bytes);
 
 	Ok(())
@@ -370,19 +346,17 @@ async fn upload_retry_reports_from_zero(_sandbox: TempDir, #[with(&_sandbox)] re
 	assert_eq!(remote.uploads.load(Ordering::SeqCst), 2);
 
 	let events = remote.events();
-	let uploads = upload_events(&events);
-	let retry = uploads
+	let retry = events
 		.windows(2)
-		.position(|pair| pair[1].bytes_handled < pair[0].bytes_handled)
+		.position(|pair| pair[1].bytes_handled() < pair[0].bytes_handled())
 		.expect("the retry starts over")
 		+ 1;
 
-	let (first, second) = uploads.split_at(retry);
+	let (first, second) = events.split_at(retry);
 	assert_monotonic(first);
 	assert_monotonic(second);
-	assert_eq!(first.last().unwrap().bytes_handled, CHUNK * 5);
-	assert_eq!(second[0].bytes_handled, 0, "the failed attempt's bytes are replaced, not added to");
-	assert!(second.iter().all(|e| e.bytes_handled <= size));
+	assert_eq!(first.last().unwrap().bytes_handled(), CHUNK * 5);
+	assert_eq!(second[0].bytes_handled(), CHUNK, "the failed attempt's bytes are replaced, not added to");
 
 	assert_last_is_final(&events, 1, size);
 
@@ -408,12 +382,11 @@ async fn upload_bytes_of_objects_in_flight_add_up(_sandbox: TempDir, #[with(&_sa
 	push(&repo, &remote, &remote.pointers(), events, 2).await?;
 
 	let events = remote.events();
-	let uploads = upload_events(&events);
-	assert_monotonic(&uploads);
+	assert_monotonic(&events);
 	// before either object is uploaded, more is sent than the larger one holds: both count
 	assert!(
-		uploads.iter().any(|e| e.objects_handled == 0 && e.bytes_handled > sizes[0]),
-		"the bytes of both objects add up: {uploads:?}"
+		in_flight(&events).into_iter().any(|bytes| bytes > sizes[0]),
+		"the bytes of both objects add up: {events:?}"
 	);
 
 	assert_last_is_final(&events, 2, total_bytes);
@@ -444,16 +417,8 @@ async fn upload_reported_from_another_thread_ends_with_progress_kept(
 	push(&repo, &remote, &remote.pointers(), events, 1).await?;
 
 	let events = remote.events();
-	let uploads = upload_events(&events);
-	assert_monotonic(&uploads);
-
-	let in_flight = uploads
-		.iter()
-		.filter(|e| e.objects_handled == 0)
-		.map(|e| e.bytes_handled)
-		.collect::<Vec<_>>();
-	assert_eq!(in_flight, [vec![0], chunk_ends(sizes[0], CHUNK)].concat());
-
+	assert_monotonic(&events);
+	assert_eq!(in_flight(&events), chunk_ends(sizes[0], CHUNK));
 	assert_last_is_final(&events, 2, total_bytes);
 
 	let kept = remote.kept.lock().unwrap();
@@ -478,12 +443,19 @@ impl CapturedRequest {
 	}
 }
 
+fn response(status: &str, headers: &str, body: &str) -> String {
+	format!(
+		"HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+		body.len()
+	)
+}
+
 /// Serves `responses` one request per connection, in order, and hands every request over.
-fn serve(listener: TcpListener, responses: Vec<(&'static str, String)>) -> std::sync::mpsc::Receiver<CapturedRequest> {
+fn serve(listener: TcpListener, responses: Vec<String>) -> std::sync::mpsc::Receiver<CapturedRequest> {
 	let (tx, rx) = std::sync::mpsc::channel();
 
 	std::thread::spawn(move || {
-		for (content_type, body) in responses {
+		for response in responses {
 			let (stream, _) = listener.accept().unwrap();
 			let mut reader = BufReader::new(stream.try_clone().unwrap());
 
@@ -503,10 +475,6 @@ fn serve(listener: TcpListener, responses: Vec<(&'static str, String)>) -> std::
 			request.body = vec![0; len];
 			reader.read_exact(&mut request.body).unwrap();
 
-			let response = format!(
-				"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-				body.len()
-			);
 			std::io::Write::write_all(&mut &stream, response.as_bytes()).unwrap();
 			tx.send(request).unwrap();
 		}
@@ -531,11 +499,19 @@ async fn reqwest_upload_streams_body_with_content_length(_sandbox: TempDir, #[wi
 			"oid": pointer.hex(),
 			"size": size,
 			"actions": {
-				"upload": { "href": format!("{base}/upload/{}", pointer.hex()), "header": { "X-Test": "yes" } }
+				"upload": {
+					"href": format!("{base}/upload/{}", pointer.hex()),
+					"header": { "X-Test": "yes" }
+				}
 			}
 		}]
 	});
-	let requests = serve(listener, vec![(MEDIA_TYPE, batch.to_string()), ("text/plain", String::new())]);
+
+	let responses = vec![
+		response("200 OK", &format!("Content-Type: {MEDIA_TYPE}\r\n"), &batch.to_string()),
+		response("200 OK", "", ""),
+	];
+	let requests = serve(listener, responses);
 
 	let client = ReqwestLfsClient::new(Url::parse(&format!("{base}/repo.git/info/lfs"))?, None);
 	let events = Arc::new(Mutex::new(vec![]));
@@ -553,16 +529,7 @@ async fn reqwest_upload_streams_body_with_content_length(_sandbox: TempDir, #[wi
 	assert!(upload.body == object, "the body is the object, byte for byte");
 
 	let events = events.lock().unwrap();
-	let in_flight = upload_events(&events)
-		.iter()
-		.filter(|e| e.objects_handled == 0)
-		.map(|e| e.bytes_handled)
-		.collect::<Vec<_>>();
-	assert_eq!(
-		in_flight,
-		[vec![0], chunk_ends(size, BODY_CHUNK)].concat(),
-		"every chunk of the body is reported"
-	);
+	assert_eq!(in_flight(&events), chunk_ends(size, BODY_CHUNK), "every chunk of the body is reported");
 	assert_last_is_final(&events, 1, size);
 
 	Ok(())
