@@ -22,7 +22,20 @@ pub struct UploadProgress {
 
 impl UploadProgress {
 	pub(super) fn new(object: usize, attempt: usize, tx: UnboundedSender<UploadMessage>) -> Self {
-		Self { object, attempt, tx }
+		// odd attempts are left for `resend`
+		Self {
+			object,
+			attempt: attempt * 2,
+			tx,
+		}
+	}
+
+	/// For sending the object again from its start within the same attempt, once.
+	pub(super) fn resend(&self) -> Self {
+		Self {
+			attempt: self.attempt + 1,
+			..self.clone()
+		}
 	}
 
 	/// `bytes` sent so far, not since the last report.

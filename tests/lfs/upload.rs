@@ -484,8 +484,14 @@ fn serve(listener: TcpListener, responses: Vec<String>) -> std::sync::mpsc::Rece
 }
 
 #[rstest]
+#[case::direct(false)]
+#[case::redirected(true)]
 #[tokio::test]
-async fn reqwest_upload_streams_body_with_content_length(_sandbox: TempDir, #[with(&_sandbox)] repo: git2::Repository) -> anyhow::Result<()> {
+async fn reqwest_upload_streams_body_with_content_length(
+	#[case] redirected: bool,
+	_sandbox: TempDir,
+	#[with(&_sandbox)] repo: git2::Repository,
+) -> anyhow::Result<()> {
 	const BODY_CHUNK: usize = 64 * 1024;
 
 	let size = BODY_CHUNK * 3 + 5;
@@ -501,16 +507,18 @@ async fn reqwest_upload_streams_body_with_content_length(_sandbox: TempDir, #[wi
 			"actions": {
 				"upload": {
 					"href": format!("{base}/upload/{}", pointer.hex()),
-					"header": { "X-Test": "yes" }
+					"header": { "X-Test": "yes", "Authorization": "Basic dGVzdA==" }
 				}
 			}
 		}]
 	});
 
-	let responses = vec![
-		response("200 OK", &format!("Content-Type: {MEDIA_TYPE}\r\n"), &batch.to_string()),
-		response("200 OK", "", ""),
-	];
+	let mut responses = vec![response("200 OK", &format!("Content-Type: {MEDIA_TYPE}\r\n"), &batch.to_string())];
+	if redirected {
+		let location = format!("Location: /moved/{}\r\n", pointer.hex());
+		responses.push(response("307 Temporary Redirect", &location, ""));
+	}
+	responses.push(response("200 OK", "", ""));
 	let requests = serve(listener, responses);
 
 	let client = ReqwestLfsClient::new(Url::parse(&format!("{base}/repo.git/info/lfs"))?, None);
@@ -520,16 +528,32 @@ async fn reqwest_upload_streams_body_with_content_length(_sandbox: TempDir, #[wi
 	let batch = requests.recv_timeout(PUSH_TIMEOUT)?;
 	assert_eq!(batch.head[0], "POST /repo.git/info/lfs/objects/batch HTTP/1.1");
 
+	if redirected {
+		let first = requests.recv_timeout(PUSH_TIMEOUT)?;
+		assert_eq!(first.head[0], format!("PUT /upload/{} HTTP/1.1", pointer.hex()));
+	}
+
 	let upload = requests.recv_timeout(PUSH_TIMEOUT)?;
-	assert_eq!(upload.head[0], format!("PUT /upload/{} HTTP/1.1", pointer.hex()));
+	let path = if redirected { "moved" } else { "upload" };
+	assert_eq!(upload.head[0], format!("PUT /{path}/{} HTTP/1.1", pointer.hex()));
 	assert_eq!(upload.header("content-length"), Some(size.to_string().as_str()));
 	assert_eq!(upload.header("transfer-encoding"), None, "the body goes out with a length, not chunked");
 	assert_eq!(upload.header("user-agent"), Some("gx-lfs/0.0.0"));
 	assert_eq!(upload.header("x-test"), Some("yes"), "the action's headers go along");
+	assert_eq!(
+		upload.header("authorization"),
+		Some("Basic dGVzdA=="),
+		"a redirect on the same host keeps them all"
+	);
 	assert!(upload.body == object, "the body is the object, byte for byte");
 
 	let events = events.lock().unwrap();
-	assert_eq!(in_flight(&events), chunk_ends(size, BODY_CHUNK), "every chunk of the body is reported");
+	let sends = if redirected { 2 } else { 1 };
+	assert_eq!(
+		in_flight(&events),
+		chunk_ends(size, BODY_CHUNK).repeat(sends),
+		"every chunk of the body is reported, and a redirected send counts from 0 again"
+	);
 	assert_last_is_final(&events, 1, size);
 
 	Ok(())

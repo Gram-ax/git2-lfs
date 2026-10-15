@@ -7,6 +7,7 @@ use crate::remote::dto::BatchResponse;
 use bytes::Bytes;
 use reqwest::header::CONTENT_LENGTH;
 use reqwest::header::HeaderMap;
+use reqwest::header::LOCATION;
 use url::Url;
 
 use sha2::Digest;
@@ -86,6 +87,17 @@ fn upload_body(blob: &[u8], progress: UploadProgress) -> reqwest::Body {
 	reqwest::Body::wrap_stream(futures::stream::iter(chunks))
 }
 
+/// reqwest can't replay a streamed body, so it leaves a 307/308 of an upload to us.
+fn redirect_to(href: &Url, res: &reqwest::Response) -> Option<Url> {
+	use reqwest::StatusCode as S;
+
+	if !matches!(res.status(), S::TEMPORARY_REDIRECT | S::PERMANENT_REDIRECT) {
+		return None;
+	}
+
+	href.join(res.headers().get(LOCATION)?.to_str().ok()?).ok()
+}
+
 #[async_trait]
 impl LfsRemote for ReqwestLfsClient {
 	async fn batch(&self, req: BatchRequest) -> Result<BatchResponse, RemoteError> {
@@ -154,17 +166,34 @@ impl LfsRemote for ReqwestLfsClient {
 	}
 
 	async fn upload(&self, action: &ObjectAction, blob: &[u8], progress: UploadProgress) -> Result<(), RemoteError> {
-		let mut req = self.client.put(&action.href);
+		let put = |url: Url, with_auth: bool, progress| {
+			let mut req = self.client.put(url);
 
-		for (key, value) in action.header.iter() {
-			req = req.header(key, value);
+			for (key, value) in action
+				.header
+				.iter()
+				.filter(|(key, _)| with_auth || !key.eq_ignore_ascii_case("authorization"))
+			{
+				req = req.header(key, value);
+			}
+
+			req = req.header("User-Agent", USER_AGENT);
+			// a streamed body has no length of its own, and hyper sends a body without one chunked, which not every
+			// lfs server accepts; a `Transfer-Encoding` the server asked for in the action's headers still wins
+			req = req.header(CONTENT_LENGTH, blob.len());
+			req.body(upload_body(blob, progress)).send()
+		};
+
+		let href = Url::parse(&action.href)?;
+		let mut res = put(href.clone(), true, progress.clone()).await;
+
+		if let Some(to) = res.as_ref().ok().and_then(|res| redirect_to(&href, res)) {
+			// like reqwest's own redirects, credentials don't go to another host
+			let same_host = to.host_str() == href.host_str() && to.port_or_known_default() == href.port_or_known_default();
+			res = put(to, same_host, progress.resend()).await;
 		}
 
-		req = req.header("User-Agent", USER_AGENT);
-		// a streamed body has no length of its own, and hyper sends a body without one chunked, which not every
-		// lfs server accepts; a `Transfer-Encoding` the server asked for in the action's headers still wins
-		req = req.header(CONTENT_LENGTH, blob.len());
-		req.body(upload_body(blob, progress)).send().await.or_err(RemoteError::Upload).await?;
+		res.or_err(RemoteError::Upload).await?;
 
 		Ok(())
 	}
