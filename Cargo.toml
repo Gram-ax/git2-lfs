@@ -21,7 +21,7 @@ reqwest = { optional = true, version = "0.12.24", features = [
 ] }
 bytes = { optional = true, version = "1" }
 
-git2 = { git = "https://github.com/gram-ax/git2-rs.git", rev = "ffe7320e0f5757b0faaebb7059f656ee53a6223e", default-features = false, features = [
+git2 = { git = "https://github.com/gram-ax/git2-rs.git", rev = "0d85dbc1fd3ffc5418692a9122c182eb3ac7e721", default-features = false, features = [
   "vendored-libgit2",
 ] }
 
