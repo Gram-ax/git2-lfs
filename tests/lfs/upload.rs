@@ -148,7 +148,7 @@ impl LfsRemote for MockRemote {
 		})
 	}
 
-	async fn download(&self, _action: &ObjectAction, _to: &mut Write) -> Result<Pointer, RemoteError> {
+	async fn download(&self, _action: &ObjectAction, _to: &mut Write, _progress: &DownloadProgress<'_>) -> Result<Pointer, RemoteError> {
 		unreachable!("the tests only upload")
 	}
 
@@ -200,8 +200,8 @@ impl LfsRemote for &MockRemote {
 		(*self).batch(req).await
 	}
 
-	async fn download(&self, action: &ObjectAction, to: &mut Write) -> Result<Pointer, RemoteError> {
-		(*self).download(action, to).await
+	async fn download(&self, action: &ObjectAction, to: &mut Write, progress: &DownloadProgress<'_>) -> Result<Pointer, RemoteError> {
+		(*self).download(action, to, progress).await
 	}
 
 	async fn upload(&self, action: &ObjectAction, blob: &[u8], progress: UploadProgress) -> Result<(), RemoteError> {
