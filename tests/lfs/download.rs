@@ -12,7 +12,6 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use futures::FutureExt;
 use git2_lfs::Pointer;
 use git2_lfs::ext::RepoLfsExt;
 use git2_lfs::remote::*;
@@ -69,9 +68,12 @@ impl MockRemote {
 	}
 }
 
-fn send(bytes: &[u8], to: &mut Write) -> Result<Pointer, RemoteError> {
+fn send(bytes: &[u8], to: &mut Write, progress: &DownloadProgress<'_>) -> Result<Pointer, RemoteError> {
+	let mut received = 0;
 	for chunk in bytes.chunks(CHUNK) {
 		to.write_all(chunk)?;
+		received += chunk.len();
+		progress.received(received);
 	}
 
 	let hash = Sha256::digest(bytes);
@@ -103,19 +105,19 @@ impl LfsRemote for MockRemote {
 		})
 	}
 
-	async fn download(&self, _action: &ObjectAction, to: &mut Write) -> Result<Pointer, RemoteError> {
+	async fn download(&self, _action: &ObjectAction, to: &mut Write, progress: &DownloadProgress<'_>) -> Result<Pointer, RemoteError> {
 		self.downloads.fetch_add(1, Ordering::SeqCst);
 
 		match self.next() {
-			Serve::Object => send(&self.object, to),
-			Serve::Truncated(n) => send(&self.object[..n], to),
-			Serve::Body(body) => send(&body, to),
+			Serve::Object => send(&self.object, to, progress),
+			Serve::Truncated(n) => send(&self.object[..n], to, progress),
+			Serve::Body(body) => send(&body, to, progress),
 			Serve::BreakAfter(n) => {
-				send(&self.object[..n], to)?;
+				send(&self.object[..n], to, progress)?;
 				Err(RemoteError::Download("connection reset".to_string()))
 			}
 			Serve::StallAfter(n) => {
-				send(&self.object[..n], to)?;
+				send(&self.object[..n], to, progress)?;
 				futures::future::pending().await
 			}
 		}
@@ -162,8 +164,8 @@ impl LfsRemote for &MockRemote {
 		(*self).batch(req).await
 	}
 
-	async fn download(&self, action: &ObjectAction, to: &mut Write) -> Result<Pointer, RemoteError> {
-		(*self).download(action, to).await
+	async fn download(&self, action: &ObjectAction, to: &mut Write, progress: &DownloadProgress<'_>) -> Result<Pointer, RemoteError> {
+		(*self).download(action, to, progress).await
 	}
 
 	async fn upload(&self, action: &ObjectAction, blob: &[u8], progress: UploadProgress) -> Result<(), RemoteError> {
@@ -238,16 +240,36 @@ async fn download_cut_short_by_server_leaves_no_object(_sandbox: TempDir, #[with
 }
 
 #[rstest]
+#[case(vec![Serve::StallAfter(CHUNK)], CHUNK)]
+#[case(vec![Serve::BreakAfter(CHUNK), Serve::StallAfter(0)], 0)]
 #[tokio::test]
-async fn cancelled_download_leaves_no_object(_sandbox: TempDir, #[with(&_sandbox)] repo: git2::Repository) -> anyhow::Result<()> {
+async fn cancelled_download_leaves_no_object_or_progress(
+	_sandbox: TempDir,
+	#[with(&_sandbox)] repo: git2::Repository,
+	#[case] plan: Vec<Serve>,
+	#[case] expected_bytes: usize,
+) -> anyhow::Result<()> {
 	let object = object_bytes();
-	let remote = MockRemote::new(&object, &[Serve::StallAfter(object.len() / 2)]);
+	let remote = MockRemote::new(&object, &plan);
+	let tracker = DownloadTracker::default();
+	let client = LfsClient::new(&repo, &remote).track_downloads(&tracker);
+	let pointers = [remote.pointer];
 
-	// the download stalls after writing half of the object; dropping the future is how a pull is cancelled
-	let pending = pull(&repo, &remote).now_or_never();
+	{
+		let pending = std::pin::pin!(client.pull(&pointers));
+		assert!(futures::poll!(pending).is_pending());
+		assert_eq!(remote.downloads.load(Ordering::SeqCst), plan.len());
+		assert_eq!(
+			tracker.current(repo.path()),
+			vec![DownloadSnapshot {
+				oid: remote.pointer.hex(),
+				size: object.len(),
+				received: expected_bytes,
+			}]
+		);
+	}
 
-	assert!(pending.is_none(), "the download must still be in progress");
-	assert_eq!(remote.downloads.load(Ordering::SeqCst), 1);
+	assert!(tracker.current(repo.path()).is_empty());
 	assert_no_object(&repo, &remote.pointer);
 
 	Ok(())
@@ -355,4 +377,90 @@ async fn stale_temporary_files_are_removed(_sandbox: TempDir, #[with(&_sandbox)]
 	assert!(own.exists(), "a temporary file of this process belongs to a download still running in it");
 
 	Ok(())
+}
+
+fn read_request(stream: &mut std::net::TcpStream) {
+	use std::io::Read as _;
+
+	let mut headers = Vec::new();
+	let mut byte = [0];
+	while !headers.ends_with(b"\r\n\r\n") {
+		stream.read_exact(&mut byte).unwrap();
+		headers.push(byte[0]);
+	}
+	let headers = String::from_utf8(headers).unwrap();
+	let length = headers
+		.lines()
+		.find_map(|line| {
+			line
+				.to_ascii_lowercase()
+				.strip_prefix("content-length:")
+				.map(|value| value.trim().parse::<usize>().unwrap())
+		})
+		.unwrap_or(0);
+	let mut body = vec![0; length];
+	stream.read_exact(&mut body).unwrap();
+}
+
+#[tokio::test]
+async fn byte_counts_are_visible_before_the_http_response_finishes() {
+	use std::io::Write as _;
+	use std::net::TcpListener;
+	use std::sync::mpsc;
+
+	use git2_lfs::remote::reqwest::ReqwestLfsClient;
+	let directory = tempfile::tempdir().unwrap();
+	let repo = git2::Repository::init(directory.path()).unwrap();
+	let bytes = vec![42; 1024 * 1024];
+	let expected = Pointer::from_blob_bytes(&bytes).unwrap();
+	let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+	let url = format!("http://{}", listener.local_addr().unwrap());
+	let action_url = format!("{url}/object");
+	let oid = expected.hex();
+	let size = bytes.len();
+	let (release, released) = mpsc::channel();
+	let server = std::thread::spawn(move || {
+		let (mut batch, _) = listener.accept().unwrap();
+		read_request(&mut batch);
+		let json = serde_json::json!({"objects":[{"oid":oid,"size":size,"actions":{"download":{"href":action_url}}}]}).to_string();
+		write!(
+			batch,
+			"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+			json.len()
+		)
+		.unwrap();
+		drop(batch);
+		let (mut body, _) = listener.accept().unwrap();
+		read_request(&mut body);
+		write!(body, "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n").unwrap();
+		body.write_all(&bytes[..size / 2]).unwrap();
+		body.flush().unwrap();
+		released.recv_timeout(Duration::from_secs(5)).unwrap();
+		body.write_all(&bytes[size / 2..]).unwrap();
+	});
+	let tracker = DownloadTracker::default();
+	let client = LfsClient::new(&repo, ReqwestLfsClient::new(url.parse().unwrap(), None)).track_downloads(&tracker);
+	let pointers = [expected];
+	let observe = async {
+		let snapshot = tokio::time::timeout(Duration::from_secs(4), async {
+			loop {
+				if let Some(progress) = tracker.current(repo.path()).into_iter().find(|item| item.received > 0) {
+					break progress;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.unwrap();
+		assert_eq!(snapshot.oid, expected.hex());
+		assert_eq!(snapshot.size, size);
+		assert!(snapshot.received <= size / 2);
+		assert!(!object_path(&repo, &expected).exists());
+		release.send(()).unwrap();
+	};
+	let (result, ()) = tokio::join!(client.pull(&pointers), observe);
+	result.unwrap();
+	assert_eq!(std::fs::read(object_path(&repo, &expected)).unwrap(), vec![42; size]);
+	assert!(tracker.current(repo.path()).is_empty());
+	server.join().unwrap();
 }

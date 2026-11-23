@@ -14,9 +14,11 @@ use serde::Deserialize;
 use serde::Serialize;
 use tracing::*;
 
+pub use download_progress::{DownloadProgress, DownloadSnapshot, DownloadTracker};
 pub use dto::*;
 pub use upload_progress::UploadProgress;
 
+mod download_progress;
 mod dto;
 mod upload_progress;
 
@@ -134,7 +136,7 @@ impl Progress {
 #[async_trait]
 pub trait LfsRemote: Send + Sync {
 	async fn batch(&self, req: BatchRequest) -> Result<BatchResponse, RemoteError>;
-	async fn download(&self, action: &ObjectAction, to: &mut Write) -> Result<Pointer, RemoteError>;
+	async fn download(&self, action: &ObjectAction, to: &mut Write, progress: &DownloadProgress<'_>) -> Result<Pointer, RemoteError>;
 	/// Sends `blob` and reports through `progress` how much of it is sent; see [`UploadProgress`].
 	async fn upload(&self, action: &ObjectAction, blob: &[u8], progress: UploadProgress) -> Result<(), RemoteError>;
 	async fn verify(&self, action: &ObjectAction, pointer: &Pointer) -> Result<(), RemoteError>;
@@ -144,6 +146,7 @@ pub struct LfsClient<'a, C: LfsRemote + Send + Sync> {
 	repo: &'a git2::Repository,
 	client: C,
 	on_progress: Option<Box<OnProgress<'a>>>,
+	download_tracker: Option<&'a DownloadTracker>,
 	concurrency_limit: usize,
 }
 
@@ -153,6 +156,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 			repo,
 			client,
 			on_progress: None,
+			download_tracker: None,
 			concurrency_limit: 1,
 		}
 	}
@@ -163,6 +167,13 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 
 	pub fn on_progress(self, on_progress: Option<Box<OnProgress<'a>>>) -> Self {
 		Self { on_progress, ..self }
+	}
+
+	pub fn track_downloads(self, tracker: &'a DownloadTracker) -> Self {
+		Self {
+			download_tracker: Some(tracker),
+			..self
+		}
 	}
 
 	pub async fn pull(&self, pointers: &[Pointer]) -> Result<(), RemoteError> {
@@ -212,7 +223,8 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 	}
 
 	async fn download_objects(&self, response: BatchResponse, pointers: &[Pointer]) -> Result<(), RemoteError> {
-		let object_dir = self.repo.path().join("lfs/objects");
+		let repo_path = self.repo.path();
+		let object_dir = repo_path.join("lfs/objects");
 		crate::object::remove_stale_tmp_files(&object_dir);
 
 		debug!(response = ?response, "download: got batch response");
@@ -251,6 +263,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 			}
 
 			let pointer = pointers.iter().find(|p| p.hex() == object.oid).ok_or(RemoteError::NotFound)?;
+			let progress = DownloadProgress::new(self.download_tracker, repo_path, pointer);
 
 			let retry_delay = Duration::from_millis(500);
 			let mut attempt = 0;
@@ -262,8 +275,9 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 				// the object reaches its path only through commit, once it matches the pointer; a failed or
 				// cancelled download drops the writer, which removes what was written so far
 				let download = async {
+					progress.received(0);
 					let mut writer = ObjectWriter::create(&object_dir, pointer)?;
-					self.client.download(&download_action, &mut writer).await?;
+					self.client.download(&download_action, &mut writer, &progress).await?;
 					writer.commit()?;
 					Ok::<_, RemoteError>(())
 				};

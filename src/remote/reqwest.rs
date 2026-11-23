@@ -1,4 +1,5 @@
 use crate::Pointer;
+use crate::remote::DownloadProgress;
 use crate::remote::LfsRemote;
 use crate::remote::UploadProgress;
 use crate::remote::Write;
@@ -135,7 +136,7 @@ impl LfsRemote for ReqwestLfsClient {
 		Ok(res)
 	}
 
-	async fn download(&self, action: &ObjectAction, to: &mut Write) -> Result<Pointer, RemoteError> {
+	async fn download(&self, action: &ObjectAction, to: &mut Write, progress: &DownloadProgress<'_>) -> Result<Pointer, RemoteError> {
 		use futures::StreamExt;
 
 		let mut req = self.client.get(&action.href);
@@ -158,6 +159,7 @@ impl LfsRemote for ReqwestLfsClient {
 			to.write_all(&chunk)?;
 			total += chunk.len();
 			checksum.update(&chunk);
+			progress.received(total);
 		}
 
 		let hash = checksum.finalize();
