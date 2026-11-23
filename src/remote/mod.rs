@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tracing::*;
 
-pub use download_progress::{DownloadProgress, DownloadSnapshot, DownloadTracker};
+pub use download_progress::{DownloadProgress, DownloadSnapshot, DownloadTracker, OnDownloadProgress};
 pub use dto::*;
 pub use upload_progress::UploadProgress;
 
@@ -147,6 +147,7 @@ pub struct LfsClient<'a, C: LfsRemote + Send + Sync> {
 	client: C,
 	on_progress: Option<Box<OnProgress<'a>>>,
 	download_tracker: Option<&'a DownloadTracker>,
+	on_download_progress: Option<&'a OnDownloadProgress<'a>>,
 	concurrency_limit: usize,
 }
 
@@ -157,6 +158,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 			client,
 			on_progress: None,
 			download_tracker: None,
+			on_download_progress: None,
 			concurrency_limit: 1,
 		}
 	}
@@ -172,6 +174,14 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 	pub fn track_downloads(self, tracker: &'a DownloadTracker) -> Self {
 		Self {
 			download_tracker: Some(tracker),
+			..self
+		}
+	}
+
+	/// Reports changed byte counts for each object, including a reset when a retry starts.
+	pub fn on_download_progress(self, on_download_progress: Option<&'a OnDownloadProgress<'a>>) -> Self {
+		Self {
+			on_download_progress,
 			..self
 		}
 	}
@@ -263,7 +273,7 @@ impl<'a, C: LfsRemote + Send + Sync> LfsClient<'a, C> {
 			}
 
 			let pointer = pointers.iter().find(|p| p.hex() == object.oid).ok_or(RemoteError::NotFound)?;
-			let progress = DownloadProgress::new(self.download_tracker, repo_path, pointer);
+			let progress = DownloadProgress::new(self.download_tracker, self.on_download_progress, repo_path, pointer);
 
 			let retry_delay = Duration::from_millis(500);
 			let mut attempt = 0;
