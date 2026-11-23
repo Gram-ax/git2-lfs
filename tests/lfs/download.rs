@@ -252,7 +252,11 @@ async fn cancelled_download_leaves_no_object_or_progress(
 	let object = object_bytes();
 	let remote = MockRemote::new(&object, &plan);
 	let tracker = DownloadTracker::default();
-	let client = LfsClient::new(&repo, &remote).track_downloads(&tracker);
+	let counts = Mutex::new(Vec::new());
+	let report = |progress: DownloadSnapshot| counts.lock().unwrap().push(progress.received);
+	let client = LfsClient::new(&repo, &remote)
+		.track_downloads(&tracker)
+		.on_download_progress(Some(&report));
 	let pointers = [remote.pointer];
 
 	{
@@ -270,6 +274,8 @@ async fn cancelled_download_leaves_no_object_or_progress(
 	}
 
 	assert!(tracker.current(repo.path()).is_empty());
+	let expected_counts = if plan.len() == 1 { vec![CHUNK] } else { vec![CHUNK, 0] };
+	assert_eq!(*counts.lock().unwrap(), expected_counts);
 	assert_no_object(&repo, &remote.pointer);
 
 	Ok(())
@@ -438,13 +444,14 @@ async fn byte_counts_are_visible_before_the_http_response_finishes() {
 		released.recv_timeout(Duration::from_secs(5)).unwrap();
 		body.write_all(&bytes[size / 2..]).unwrap();
 	});
-	let tracker = DownloadTracker::default();
-	let client = LfsClient::new(&repo, ReqwestLfsClient::new(url.parse().unwrap(), None)).track_downloads(&tracker);
+	let snapshot = Mutex::new(None);
+	let report = |progress| *snapshot.lock().unwrap() = Some(progress);
+	let client = LfsClient::new(&repo, ReqwestLfsClient::new(url.parse().unwrap(), None)).on_download_progress(Some(&report));
 	let pointers = [expected];
 	let observe = async {
 		let snapshot = tokio::time::timeout(Duration::from_secs(4), async {
 			loop {
-				if let Some(progress) = tracker.current(repo.path()).into_iter().find(|item| item.received > 0) {
+				if let Some(progress) = snapshot.lock().unwrap().take() {
 					break progress;
 				}
 				tokio::time::sleep(Duration::from_millis(10)).await;
@@ -461,6 +468,5 @@ async fn byte_counts_are_visible_before_the_http_response_finishes() {
 	let (result, ()) = tokio::join!(client.pull(&pointers), observe);
 	result.unwrap();
 	assert_eq!(std::fs::read(object_path(&repo, &expected)).unwrap(), vec![42; size]);
-	assert!(tracker.current(repo.path()).is_empty());
 	server.join().unwrap();
 }

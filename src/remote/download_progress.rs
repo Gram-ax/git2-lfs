@@ -14,6 +14,8 @@ pub struct DownloadSnapshot {
 	pub received: usize,
 }
 
+pub type OnDownloadProgress<'a> = dyn Fn(DownloadSnapshot) + Sync + 'a;
+
 struct Download {
 	repo: PathBuf,
 	oid: String,
@@ -47,34 +49,49 @@ impl DownloadTracker {
 /// Reports cumulative bytes for the current attempt. The entry lives until the object is
 /// committed, abandoned, or cancelled.
 pub struct DownloadProgress<'a> {
-	active: Option<(&'a DownloadTracker, Arc<Download>)>,
+	tracker: Option<&'a DownloadTracker>,
+	on_progress: Option<&'a OnDownloadProgress<'a>>,
+	active: Option<Arc<Download>>,
 }
 
 impl<'a> DownloadProgress<'a> {
-	pub(super) fn new(tracker: Option<&'a DownloadTracker>, repo: &Path, pointer: &Pointer) -> Self {
-		let active = tracker.map(|tracker| {
-			let download = Arc::new(Download {
+	pub(super) fn new(tracker: Option<&'a DownloadTracker>, on_progress: Option<&'a OnDownloadProgress<'a>>, repo: &Path, pointer: &Pointer) -> Self {
+		let active = (tracker.is_some() || on_progress.is_some()).then(|| {
+			Arc::new(Download {
 				repo: repo.to_path_buf(),
 				oid: pointer.hex(),
 				size: pointer.size(),
 				received: AtomicUsize::new(0),
-			});
-			tracker.active.lock().unwrap().push(download.clone());
-			(tracker, download)
+			})
 		});
-		Self { active }
+		if let Some((tracker, download)) = tracker.zip(active.as_ref()) {
+			tracker.active.lock().unwrap().push(download.clone());
+		}
+		Self {
+			tracker,
+			on_progress,
+			active,
+		}
 	}
 
 	pub fn received(&self, bytes: usize) {
-		if let Some((_, download)) = &self.active {
-			download.received.store(bytes.min(download.size), Ordering::Relaxed);
+		if let Some(download) = &self.active {
+			let received = bytes.min(download.size);
+			let previous = download.received.swap(received, Ordering::Relaxed);
+			if let Some(report) = self.on_progress.filter(|_| received != previous) {
+				report(DownloadSnapshot {
+					oid: download.oid.clone(),
+					size: download.size,
+					received,
+				});
+			}
 		}
 	}
 }
 
 impl Drop for DownloadProgress<'_> {
 	fn drop(&mut self) {
-		if let Some((tracker, download)) = &self.active {
+		if let Some((tracker, download)) = self.tracker.zip(self.active.as_ref()) {
 			tracker.active.lock().unwrap().retain(|item| !Arc::ptr_eq(item, download));
 		}
 	}
